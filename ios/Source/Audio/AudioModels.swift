@@ -24,7 +24,7 @@ public struct LocalTranscriptionEvent: CustomStringConvertible {
 }
 
 public struct MicPcmEvent: CustomStringConvertible {
-    public static let sampleRate = 16_000
+    public static let sampleRate = 16000
     public static let bitsPerSample = 16
     public static let channels = 1
     public static let encoding = "pcm_s16le"
@@ -43,7 +43,8 @@ public struct MicPcmEvent: CustomStringConvertible {
         let bitsPerSample = intValue(values["bitsPerSample"]) ?? Self.bitsPerSample
         let channels = intValue(values["channels"]) ?? Self.channels
         let encoding = values["encoding"] as? String ?? Self.encoding
-        let voiceActivityDetectionEnabled = boolValue(values, "voiceActivityDetectionEnabled") ?? true
+        let voiceActivityDetectionEnabled =
+            boolValue(values, "voiceActivityDetectionEnabled") ?? BluetoothSdkDefaults.voiceActivityDetectionEnabled
 
         var normalized = values
         normalized["type"] = "mic_pcm"
@@ -69,7 +70,7 @@ public struct MicPcmEvent: CustomStringConvertible {
 }
 
 public struct MicLc3Event: CustomStringConvertible {
-    public static let sampleRate = 16_000
+    public static let sampleRate = 16000
     public static let channels = 1
     public static let encoding = "lc3"
     public static let frameDurationMs = 10
@@ -95,7 +96,8 @@ public struct MicLc3Event: CustomStringConvertible {
         let frameSizeBytes = intValue(values["frameSizeBytes"]) ?? Self.defaultFrameSizeBytes
         let bitrate = intValue(values["bitrate"]) ?? frameSizeBytes * 8 * (1000 / frameDurationMs)
         let packetizedFromGlasses = boolValue(values, "packetizedFromGlasses") ?? false
-        let voiceActivityDetectionEnabled = boolValue(values, "voiceActivityDetectionEnabled") ?? true
+        let voiceActivityDetectionEnabled =
+            boolValue(values, "voiceActivityDetectionEnabled") ?? BluetoothSdkDefaults.voiceActivityDetectionEnabled
 
         var normalized = values
         normalized["type"] = "mic_lc3"
@@ -132,8 +134,8 @@ public struct GlassesMediaVolumeGetResult: CustomStringConvertible {
     public let values: [String: Any]
 
     public init(values: [String: Any]) {
-        self.level = intValue(values["level"])
-        self.statusCode = intValue(values["statusCode"])
+        level = intValue(values["level"])
+        statusCode = intValue(values["statusCode"])
         self.values = values
     }
 
@@ -149,7 +151,7 @@ public struct GlassesMediaVolumeSetResult: CustomStringConvertible {
     public let values: [String: Any]
 
     public init(values: [String: Any]) {
-        self.statusCode = intValue(values["statusCode"])
+        statusCode = intValue(values["statusCode"])
         self.values = values
     }
 

@@ -17,7 +17,7 @@ For `Package.swift` consumers:
 ```swift
 .package(
   url: "https://github.com/Mentra-Community/mentra-bluetooth-sdk-ios.git",
-  from: "0.1.7"
+  from: "0.1.10"
 )
 ```
 
@@ -90,4 +90,4 @@ To keep the BLE link alive while the app is backgrounded, enable Core Bluetooth 
 
 ## Scope
 
-This Swift package contains the core iOS Bluetooth SDK. It intentionally excludes optional MentraOS-internal code paths for local STT, Nex/SwiftProtobuf, Vuzix/Ultralite, and tar.bz2 extraction.
+This Swift package contains the core iOS Bluetooth SDK. It intentionally excludes optional MentraOS-internal code paths for local STT, offline TTS, Nex/SwiftProtobuf, Vuzix/Ultralite, and tar.bz2 extraction.

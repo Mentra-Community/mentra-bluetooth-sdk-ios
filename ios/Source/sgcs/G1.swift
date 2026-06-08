@@ -278,7 +278,7 @@ class G1: NSObject, SGCManager {
 
     func requestPhoto(
         _: String, appId _: String, size _: String?, webhookUrl _: String?, authToken _: String?,
-        compress _: String?, flash _: Bool, sound _: Bool, exposureTimeNs _: Double?, iso _: Int?
+        compress _: String?, flash _: Bool, save _: Bool, sound _: Bool, exposureTimeNs _: Double?, iso _: Int?
     ) {}
 
     func startStream(_: [String: Any]) {}
@@ -1871,7 +1871,7 @@ extension G1 {
 
     // MARK: - Enhanced BMP Display Methods
 
-    func displayBitmap(base64ImageData: String) async -> Bool {
+    func displayBitmap(base64ImageData: String, x _: Int32? = nil, y _: Int32? = nil, width _: Int32? = nil, height _: Int32? = nil) async -> Bool {
         guard let bmpData = Data(base64Encoded: base64ImageData) else {
             Bridge.log("G1: Failed to decode base64 image data")
             return false
