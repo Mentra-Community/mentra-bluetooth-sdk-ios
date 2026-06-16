@@ -79,8 +79,8 @@ class Simulated: SGCManager {
 
     // MARK: - Camera & Media
 
-    func requestPhoto(_: String, appId _: String, size _: String?, webhookUrl _: String?, authToken _: String?, compress _: String?, flash _: Bool, save _: Bool, sound _: Bool, exposureTimeNs _: Double?, iso _: Int?) {
-        Bridge.log("requestPhoto")
+    func requestPhoto(_ request: PhotoRequest) {
+        Bridge.log("requestPhoto flash=\(request.flash) save=\(request.save) sound=\(request.sound)")
     }
 
     func startStream(_: [String: Any]) {
@@ -131,6 +131,10 @@ class Simulated: SGCManager {
 
     func clearDisplay() {
         Bridge.log("clearDisplay")
+    }
+
+    func sendText(_ text: String) async {
+        await sendTextWall(text)
     }
 
     func sendTextWall(_: String) async {
@@ -246,7 +250,7 @@ class Simulated: SGCManager {
         Bridge.log("sendUserEmailToGlasses: \(email)")
     }
 
-    func sendOtaStart() {
+    func sendOtaStart(otaVersionUrl: String?) {
         Bridge.log("sendOtaStart")
     }
 

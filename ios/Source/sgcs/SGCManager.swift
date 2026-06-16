@@ -18,10 +18,7 @@ protocol SGCManager {
 
     // MARK: - Camera & Media
 
-    func requestPhoto(
-        _ requestId: String, appId: String, size: String?, webhookUrl: String?, authToken: String?,
-        compress: String?, flash: Bool, save: Bool, sound: Bool, exposureTimeNs: Double?, iso: Int?
-    )
+    func requestPhoto(_ request: PhotoRequest)
     func startStream(_ message: [String: Any])
     func stopStream()
     func sendStreamKeepAlive(_ message: [String: Any])
@@ -54,6 +51,7 @@ protocol SGCManager {
 
     func setBrightness(_ level: Int, autoMode: Bool)
     func clearDisplay()
+    func sendText(_ text: String) async
     func sendTextWall(_ text: String) async
     func sendDoubleTextWall(_ top: String, _ bottom: String) async
     /// Display a bitmap. Optional `x`/`y`/`width`/`height` position and size the target
@@ -118,7 +116,7 @@ protocol SGCManager {
     func sendWifiCredentials(_ ssid: String, _ password: String)
     func forgetWifiNetwork(_ ssid: String)
     func sendHotspotState(_ enabled: Bool)
-    func sendOtaStart()
+    func sendOtaStart(otaVersionUrl: String?)
     func sendOtaQueryStatus()
     func sendSetSystemTime(_ timestampMs: Int64)
     func sendOtaRetryVersionCheck()

@@ -276,10 +276,7 @@ class G1: NSObject, SGCManager {
 
     func sendButtonMaxRecordingTime(_: Int) {}
 
-    func requestPhoto(
-        _: String, appId _: String, size _: String?, webhookUrl _: String?, authToken _: String?,
-        compress _: String?, flash _: Bool, save _: Bool, sound _: Bool, exposureTimeNs _: Double?, iso _: Int?
-    ) {}
+    func requestPhoto(_: PhotoRequest) {}
 
     func startStream(_: [String: Any]) {}
 
@@ -317,7 +314,7 @@ class G1: NSObject, SGCManager {
 
     func queryGalleryStatus() {}
 
-    func sendOtaStart() {}
+    func sendOtaStart(otaVersionUrl: String?) {}
     func sendOtaQueryStatus() {}
 
     func ping() {}
@@ -784,6 +781,10 @@ class G1: NSObject, SGCManager {
         //      CoreCommsService.log("encodedChunks: \(encodedChunks.count)")
         //      self.queueChunks(encodedChunks)
         //    }
+    }
+
+    func sendText(_ text: String) async {
+        await sendTextWall(text)
     }
 
     func sendTextWall(_ text: String) async {
