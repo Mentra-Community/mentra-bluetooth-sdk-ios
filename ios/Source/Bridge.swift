@@ -347,6 +347,10 @@ class Bridge {
         Bridge.sendTypedMessage("photo_status", body: status)
     }
 
+    static func sendCameraStatus(_ status: [String: Any]) {
+        Bridge.sendTypedMessage("camera_status", body: status)
+    }
+
     static func sendPhotoResponse(_ response: [String: Any]) {
         Bridge.sendTypedMessage("photo_response", body: response)
     }
@@ -432,22 +436,6 @@ class Bridge {
             "timestamp": Int64(Date().timeIntervalSince1970 * 1000),
         ]
         Bridge.sendTypedMessage("ota_start_ack", body: eventBody)
-    }
-
-    /// Send OTA update available notification - glasses have detected an available update (background mode)
-    static func sendOtaUpdateAvailable(
-        versionCode: Int64,
-        versionName: String,
-        updates: [String],
-        totalSize: Int64
-    ) {
-        let eventBody: [String: Any] = [
-            "version_code": versionCode,
-            "version_name": versionName,
-            "updates": updates,
-            "total_size": totalSize,
-        ]
-        Bridge.sendTypedMessage("ota_update_available", body: eventBody)
     }
 
     static func sendOtaStatus(

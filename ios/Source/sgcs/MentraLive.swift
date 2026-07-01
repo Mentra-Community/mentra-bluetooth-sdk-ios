@@ -1616,13 +1616,12 @@ class MentraLive: NSObject, SGCManager {
 
     func requestPhoto(_ request: PhotoRequest) {
         Bridge.log(
-            "LIVE: PHOTO PIPELINE [5/6] requestPhoto() entry requestId=\(request.requestId) appId=\(request.appId) save=\(request.save) sound=\(request.sound) iso=\(request.iso.map { String($0) } ?? "auto") aeDivisor=\(request.aeExposureDivisor.map { String($0) } ?? "nil")"
+            "LIVE: PHOTO PIPELINE [5/6] requestPhoto() entry requestId=\(request.requestId) save=\(request.save) sound=\(request.sound) iso=\(request.iso.map { String($0) } ?? "auto") aeDivisor=\(request.aeExposureDivisor.map { String($0) } ?? "nil")"
         )
 
         var json: [String: Any] = [
             "type": "take_photo",
             "requestId": request.requestId,
-            "appId": request.appId,
         ]
 
         // Always generate BLE ID for potential fallback
@@ -1671,6 +1670,32 @@ class MentraLive: NSObject, SGCManager {
 
         Bridge.log("LIVE: PHOTO PIPELINE [5b/6] take_photo JSON ready bleImgId=\(bleImgId) transferMethod=auto")
         Bridge.log("LIVE: PHOTO PIPELINE [6/6] Dispatching take_photo to sendJson()")
+
+        sendJson(json, wakeUp: true)
+    }
+
+    func warmUpCamera(
+        requestId: String,
+        size: PhotoSize,
+        exposureTimeNs: Double?,
+        durationMs: Int
+    ) {
+        Bridge.log(
+            "LIVE: warmUpCamera() entry requestId=\(requestId) size=\(size.rawValue) durationMs=\(durationMs)"
+        )
+
+        let allowedSizes = ["low", "medium", "high", "max"]
+        let sizeRaw = size.rawValue
+        var json: [String: Any] = [
+            "type": "camera_warm_up",
+            "requestId": requestId,
+            "size": allowedSizes.contains(sizeRaw) ? sizeRaw : "medium",
+            "durationMs": durationMs > 0 ? durationMs : 15000,
+        ]
+
+        if let e = exposureTimeNs, e.isFinite, e > 0, e <= Double(Int64.max) {
+            json["exposureTimeNs"] = Int64(e)
+        }
 
         sendJson(json, wakeUp: true)
     }
@@ -2172,6 +2197,9 @@ class MentraLive: NSObject, SGCManager {
         case "photo_status":
             emitPhotoStatus(json)
 
+        case "camera_status":
+            emitCameraStatus(json)
+
         case "photo_response":
             emitPhotoResponse(json)
 
@@ -2282,32 +2310,6 @@ class MentraLive: NSObject, SGCManager {
 
             // Send to React Native via Bridge
             Bridge.sendMtkUpdateComplete(message: updateMessage, timestamp: timestamp)
-
-        case "ota_update_available":
-            // Process OTA update available notification from glasses (background mode)
-            Bridge.log("📱 Received ota_update_available from glasses")
-
-            let versionCode = json["version_code"] as? Int64 ?? 0
-            let versionName = json["version_name"] as? String ?? ""
-            let totalSize = json["total_size"] as? Int64 ?? 0
-
-            // Parse updates array
-            var updates: [String] = []
-            if let updatesArray = json["updates"] as? [String] {
-                updates = updatesArray
-            }
-
-            Bridge.log(
-                "📱 OTA available - version: \(versionName) (\(versionCode)), updates: \(updates), size: \(totalSize) bytes"
-            )
-
-            // Send to React Native
-            Bridge.sendOtaUpdateAvailable(
-                versionCode: versionCode,
-                versionName: versionName,
-                updates: updates,
-                totalSize: totalSize
-            )
 
         case "ota_start_ack":
             // Glasses acknowledged receipt of ota_start — phone can cancel its retry timer
@@ -2898,17 +2900,6 @@ class MentraLive: NSObject, SGCManager {
 
         let json: [String: Any] = [
             "type": "ota_query_status",
-            "timestamp": Int(Date().timeIntervalSince1970 * 1000),
-        ]
-
-        sendJson(json, wakeUp: true)
-    }
-
-    func sendOtaRetryVersionCheck() {
-        Bridge.log("LIVE: ⏰ Sending ota_retry_version_check command to glasses")
-
-        let json: [String: Any] = [
-            "type": "ota_retry_version_check",
             "timestamp": Int(Date().timeIntervalSince1970 * 1000),
         ]
 
@@ -4346,6 +4337,10 @@ class MentraLive: NSObject, SGCManager {
         Bridge.sendPhotoStatus(json)
     }
 
+    private func emitCameraStatus(_ json: [String: Any]) {
+        Bridge.sendCameraStatus(json)
+    }
+
     private func emitPhotoResponse(_ json: [String: Any]) {
         Bridge.sendPhotoResponse(json)
     }
@@ -5334,6 +5329,25 @@ extension MentraLive {
                 "fov": fov,
                 "roi_position": roiPosition,
             ],
+        ]
+        if let requestId, !requestId.isEmpty {
+            json["request_id"] = requestId
+        }
+        sendJson(json, wakeUp: true)
+    }
+
+    func sendCameraTuningConfig(requestId: String?, anrOn: Bool, gainOn: Bool) {
+        Bridge.log("Sending camera tuning config: anr=\(anrOn), gain=\(gainOn)")
+
+        guard connectionState == ConnTypes.CONNECTED else {
+            Bridge.log("Cannot send camera tuning config - not connected")
+            return
+        }
+
+        var json: [String: Any] = [
+            "type": "camera_tuning_config",
+            "anr": anrOn,
+            "gain": gainOn,
         ]
         if let requestId, !requestId.isEmpty {
             json["request_id"] = requestId

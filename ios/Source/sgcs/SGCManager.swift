@@ -56,6 +56,12 @@ protocol SGCManager {
     /// Display a bitmap. Optional `x`/`y`/`width`/`height` position and size the target
     /// container (used by G2; other SGCs ignore positioning and render the bitmap as before).
     func displayBitmap(base64ImageData: String, x: Int32?, y: Int32?, width: Int32?, height: Int32?) async -> Bool
+    /// Show text in a positioned container with an optional rounded border.
+    /// G2-only capability; default no-op (see protocol extension) so other glasses ignore it.
+    func sendPositionedText(
+        _ text: String, x: Int32, y: Int32, width: Int32, height: Int32,
+        borderWidth: Int32, borderRadius: Int32
+    ) async
     func showDashboard()
     func setDashboardPosition(_ height: Int, _ depth: Int)
     /// Default implementation sends both via [setDashboardPosition]; Nex overrides to one protobuf.
@@ -118,7 +124,6 @@ protocol SGCManager {
     func sendOtaStart(otaVersionUrl: String?)
     func sendOtaQueryStatus()
     func sendSetSystemTime(_ timestampMs: Int64)
-    func sendOtaRetryVersionCheck()
 
     // MARK: - User Context (for crash reporting)
 
@@ -145,6 +150,12 @@ protocol SGCManager {
 /// doesn't seem to work for concurrency reasons :(
 /// we can make read-only getters for convienence though:
 extension SGCManager {
+    /// Default: no-op. Only G2 renders positioned text containers; other glasses ignore it.
+    func sendPositionedText(
+        _: String, x _: Int32, y _: Int32, width _: Int32, height _: Int32,
+        borderWidth _: Int32, borderRadius _: Int32
+    ) async {}
+
     // MARK: - Video recording (default: ignore custom settings, use saved defaults)
 
     func startVideoRecording(
@@ -199,10 +210,6 @@ extension SGCManager {
     /// Default no-op; Mentra Live overrides when phone detects clock skew during gallery sync.
     func sendSetSystemTime(_: Int64) {
         Bridge.log("SGC: sendSetSystemTime not supported")
-    }
-
-    func sendOtaRetryVersionCheck() {
-        Bridge.log("SGC: sendOtaRetryVersionCheck not supported")
     }
 
     // MARK: - Default DeviceStore-backed property implementations
