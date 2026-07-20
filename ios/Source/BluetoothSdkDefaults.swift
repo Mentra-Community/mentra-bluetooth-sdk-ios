@@ -7,7 +7,7 @@ enum BluetoothSdkDefaults {
     }
 
     static let voiceActivityDetectionEnabled = false
-    private static let swiftPackageSdkVersion = "0.1.20"
+    private static let swiftPackageSdkVersion = "0.1.21-dev.0"
     private static let swiftPackageSdkVersionPlaceholder = "__MENTRA" + "_BLUETOOTH_SDK_VERSION__"
 
     private static func normalizedSdkVersion(_ value: String?) -> String? {
