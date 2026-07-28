@@ -88,12 +88,13 @@ class DeviceStore {
         store.set("bluetooth", "contextual_dashboard", true)
         store.set("bluetooth", "gallery_mode", true)
         store.set("bluetooth", "voice_activity_detection_enabled", BluetoothSdkDefaults.voiceActivityDetectionEnabled)
+        store.set("bluetooth", "loudness_gate_enabled", BluetoothSdkDefaults.loudnessGateEnabled)
         // Mentra Nex feature flag (off by default; toggled from Nex Developer Settings):
         store.set("bluetooth", "nex_chinese_captions", false)
         store.set("bluetooth", "screen_disabled", false)
         store.set("bluetooth", "button_photo_size", "max")
         store.set("bluetooth", "button_max_recording_time", 10)
-        store.set("bluetooth", "camera_fov", ["fov": 102, "roi_position": 0])
+        store.set("bluetooth", "camera_fov", ["fov": 118, "roi_position": 0])
         store.set("bluetooth", "button_video_width", 1280)
         store.set("bluetooth", "button_video_height", 720)
         store.set("bluetooth", "button_video_fps", 30)
@@ -244,6 +245,9 @@ class DeviceStore {
 
         case ("bluetooth", "voice_activity_detection_enabled"):
             DeviceManager.shared.sgc?.sendVoiceActivityDetectionSetting()
+
+        case ("bluetooth", "loudness_gate_enabled"):
+            DeviceManager.shared.sgc?.sendLoudnessGateSetting()
 
         case ("bluetooth", "screen_disabled"):
             if let disabled = value as? Bool {
