@@ -890,6 +890,13 @@ public final class MentraBluetoothSDK {
         }
     }
 
+    /// Fire-and-forget Mentra Live Wi-Fi ADB toggle. Glasses do not ack this
+    /// command, so there is no pending-response wait (unlike hotspot / Wi-Fi forget).
+    public func setWifiAdbState(enabled: Bool) async throws {
+        try requireGlassesConnected(operation: "toggle Wi-Fi ADB")
+        DeviceManager.shared.setWifiAdbState(enabled)
+    }
+
     func setSystemTime(timestampMs: Int64) {
         DeviceManager.shared.setSystemTime(timestampMs)
     }
@@ -1165,11 +1172,13 @@ public final class MentraBluetoothSDK {
         }
     }
 
-    func setOtaVersionUrl(_ otaVersionUrl: String) throws {
+    /// Select the HTTP(S) manifest used by subsequent OTA checks and installs.
+    public func setOtaVersionUrl(_ otaVersionUrl: String) throws {
         configuredOtaVersionUrl = try OtaManifestChecker.normalizeHttpUrl(otaVersionUrl)
     }
 
-    func getOtaVersionUrl() throws -> String {
+    /// Return the configured OTA manifest, or this SDK release's default manifest.
+    public func getOtaVersionUrl() throws -> String {
         try configuredOtaVersionUrl ?? OtaManifestDefaults.defaultOtaVersionUrl()
     }
 
@@ -2171,7 +2180,4 @@ private func dispatchDiscoveredDevices(_ rawSearchResults: Any?) {
         }
     }
 }
-
-
-
 

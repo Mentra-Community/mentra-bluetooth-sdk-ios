@@ -1327,6 +1327,11 @@ struct ViewState {
         sgc?.sendHotspotState(enabled)
     }
 
+    func setWifiAdbState(_ enabled: Bool) {
+        Bridge.log("MAN: 🔧 Setting glasses Wi-Fi ADB state: \(enabled)")
+        sgc?.sendWifiAdbState(enabled)
+    }
+
     func setSystemTime(_ timestampMs: Int64) {
         Bridge.log("MAN: Setting glasses system time: \(timestampMs)")
         sgc?.sendSetSystemTime(timestampMs)
@@ -1721,6 +1726,7 @@ struct ViewState {
         // previously connected pair can never be reported for the next connection.
         DeviceStore.shared.apply("glasses", "serialNumber", "")
         DeviceStore.shared.apply("glasses", "bluetoothMacAddress", "")
+        DeviceStore.shared.apply("glasses", "wifiMacAddress", "")
         DeviceStore.shared.apply("glasses", "leftMacAddress", "")
         DeviceStore.shared.apply("glasses", "rightMacAddress", "")
         DeviceStore.shared.apply("glasses", "macAddress", "")
