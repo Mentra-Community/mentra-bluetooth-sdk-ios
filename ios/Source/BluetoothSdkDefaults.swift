@@ -3,12 +3,15 @@ import Foundation
 /// Defaults for the public Bluetooth SDK surface.
 enum BluetoothSdkDefaults {
     static var sdkVersion: String? {
+        // Release exports replace the source placeholder; Expo builds stamp the host Info.plist.
         normalizedSdkVersion(swiftPackageSdkVersion)
+            ?? normalizedSdkVersion(Bundle.main.object(forInfoDictionaryKey: infoSdkVersionKey) as? String)
     }
 
     static let voiceActivityDetectionEnabled = false
     static let loudnessGateEnabled = true
-    private static let swiftPackageSdkVersion = "0.1.21-dev.6"
+    private static let infoSdkVersionKey = "MentraBluetoothSdkVersion"
+    private static let swiftPackageSdkVersion = "3.1.0-dev.1"
     private static let swiftPackageSdkVersionPlaceholder = "__MENTRA" + "_BLUETOOTH_SDK_VERSION__"
 
     private static func normalizedSdkVersion(_ value: String?) -> String? {
