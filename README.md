@@ -17,7 +17,7 @@ For `Package.swift` consumers:
 ```swift
 .package(
   url: "https://github.com/Mentra-Community/mentra-bluetooth-sdk-ios.git",
-  from: "3.1.0-beta.100"
+  from: "3.1.0-dev.101"
 )
 ```
 
