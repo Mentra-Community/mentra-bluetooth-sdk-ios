@@ -1,6 +1,6 @@
-# Mentra Bluetooth SDK for iOS and macOS
+# Mentra Bluetooth SDK for iOS
 
-Native Swift package for building iOS, iPadOS, and macOS apps that connect directly to Mentra smart glasses over Bluetooth. Native macOS apps can use AppKit or SwiftUI on Apple silicon and Intel Macs.
+Native Swift package for building iOS apps that connect directly to Mentra smart glasses over Bluetooth.
 
 ## Installation
 
@@ -17,7 +17,7 @@ For `Package.swift` consumers:
 ```swift
 .package(
   url: "https://github.com/Mentra-Community/mentra-bluetooth-sdk-ios.git",
-  from: "3.2.0-dev.136"
+  from: "3.1.0-beta.135"
 )
 ```
 
@@ -28,9 +28,8 @@ For `Package.swift` consumers:
 ## Requirements
 
 - iOS 15.1 or newer
-- macOS 13 or newer for native Mac apps
 - Xcode 15 or newer
-- A physical iPhone, iPad, or Mac for Bluetooth testing
+- A physical iPhone for Bluetooth testing
 
 ## Usage
 
@@ -80,14 +79,7 @@ If your app uses microphone features, also add:
 <string>This app uses the microphone when you enable audio features.</string>
 ```
 
-For local photo receivers, LAN webhooks, or local OTA servers, also add:
-
-```xml
-<key>NSLocalNetworkUsageDescription</key>
-<string>This app accesses photo and OTA servers on your local network.</string>
-```
-
-On iOS, to keep the BLE link alive while the app is backgrounded, enable Core Bluetooth background mode:
+To keep the BLE link alive while the app is backgrounded, enable Core Bluetooth background mode:
 
 ```xml
 <key>UIBackgroundModes</key>
@@ -98,6 +90,4 @@ On iOS, to keep the BLE link alive while the app is backgrounded, enable Core Bl
 
 ## Scope
 
-Sandboxed macOS apps need the `com.apple.security.device.bluetooth` entitlement. Enable `com.apple.security.network.client` for uploads/OTA and `com.apple.security.device.audio-input` when capturing the Mac microphone. macOS does not use `UIBackgroundModes` or `AVAudioSession`; audio follows the Mac's selected output. ANCS notification relay is iOS-only.
-
-This Swift package contains the core Apple-platform Bluetooth SDK. It intentionally excludes optional MentraOS-internal code paths for local STT, offline TTS, Nex/SwiftProtobuf, Vuzix/Ultralite, and tar.bz2 extraction.
+This Swift package contains the core iOS Bluetooth SDK. It intentionally excludes optional MentraOS-internal code paths for local STT, offline TTS, Nex/SwiftProtobuf, Vuzix/Ultralite, and tar.bz2 extraction.
