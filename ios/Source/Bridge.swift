@@ -382,11 +382,6 @@ class Bridge {
         {
             body["hotspotOtaVersion"] = hotspotOtaVersion
         }
-        // Only when present: this event fires per version_info chunk and only chunk 1 carries
-        // package_name, so an unconditional "" would clobber a known identity.
-        if let packageName = stringValue(values, "packageName", "package_name"), !packageName.isEmpty {
-            body["packageName"] = packageName
-        }
         Bridge.sendTypedMessage("version_info", body: body)
     }
 
@@ -566,8 +561,7 @@ class Bridge {
         overallPercent: Int,
         status: String,
         errorMessage: String?,
-        glassesTimeMs: Int64? = nil,
-        bytesDownloaded: Int64? = nil
+        glassesTimeMs: Int64? = nil
     ) {
         var eventBody: [String: Any] = [
             "session_id": sessionId,
@@ -584,9 +578,6 @@ class Bridge {
         }
         if let glassesTimeMs, glassesTimeMs > 0 {
             eventBody["glasses_time_ms"] = glassesTimeMs
-        }
-        if let bytesDownloaded {
-            eventBody["bytes_downloaded"] = bytesDownloaded
         }
         Bridge.sendTypedMessage("ota_status", body: eventBody)
     }
@@ -664,5 +655,6 @@ class Bridge {
         return payload
     }
 }
+
 
 
