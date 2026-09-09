@@ -24,7 +24,6 @@ private final class ActiveScanSession {
     let model: DeviceModel
     let onResults: ([Device]) -> Void
     let onComplete: ([Device]) -> Void
-    let onDiagnostic: ((ScanDiagnostic) -> Void)?
     var latestResults: [Device] = []
     var timeoutTask: Task<Void, Never>?
     weak var publicSession: ScanSession?
@@ -32,13 +31,11 @@ private final class ActiveScanSession {
     init(
         model: DeviceModel,
         onResults: @escaping ([Device]) -> Void,
-        onComplete: @escaping ([Device]) -> Void,
-        onDiagnostic: ((ScanDiagnostic) -> Void)?
+        onComplete: @escaping ([Device]) -> Void
     ) {
         self.model = model
         self.onResults = onResults
         self.onComplete = onComplete
-        self.onDiagnostic = onDiagnostic
     }
 }
 
@@ -358,26 +355,12 @@ public final class MentraBluetoothSDK {
         onResults: @escaping ([Device]) -> Void,
         onComplete: @escaping ([Device]) -> Void = { _ in }
     ) throws -> ScanSession {
-        try scan(model: model, timeout: timeout, onResults: onResults, onDiagnostic: nil, onComplete: onComplete)
-    }
-
-    /// Optional advisory before an empty completed scan. Existing scan overloads
-    /// retain their signatures and behavior; cancellation does not produce hints.
-    @discardableResult
-    public func scan(
-        model: DeviceModel,
-        timeout: TimeInterval = 15,
-        onResults: @escaping ([Device]) -> Void,
-        onDiagnostic: ((ScanDiagnostic) -> Void)?,
-        onComplete: @escaping ([Device]) -> Void = { _ in }
-    ) throws -> ScanSession {
         let normalizedTimeout = timeout > 0 && timeout.isFinite ? timeout : 15
         let id = UUID()
         let activeSession = ActiveScanSession(
             model: model,
             onResults: onResults,
-            onComplete: onComplete,
-            onDiagnostic: onDiagnostic
+            onComplete: onComplete
         )
         let publicSession = ScanSession { [weak self] in
             self?.finishScanSession(id, reason: .cancelled, shouldStopScan: true)
@@ -487,11 +470,6 @@ public final class MentraBluetoothSDK {
 
     public func clearDisplay() async throws {
         DeviceManager.shared.sgc?.clearDisplay()
-    }
-
-    /// Sets session-only content shown below the standard dashboard status header.
-    public func setDashboardContent(_ content: String) async {
-        await DeviceManager.shared.setDashboardContent(content)
     }
 
     public func showDashboard() {
@@ -1267,17 +1245,6 @@ public final class MentraBluetoothSDK {
             throw BluetoothSdkError(
                 code: "missing_glasses_version",
                 message: "Cannot check OTA update because glasses build number is unavailable."
-            )
-        }
-        // A sideloaded client installs under its own package and coexists with the stock system
-        // app, so its build number is not comparable to the manifest pin and installing the
-        // manifest's APK would not replace it. Refuse rather than answer about the wrong client.
-        // Empty means the glasses predate the field: assume stock and keep existing behavior.
-        guard status.packageName.isEmpty || status.packageName == OtaManifestChecker.asgClientPackage else {
-            throw BluetoothSdkError(
-                code: "unofficial_client",
-                message: "Cannot check OTA update because the glasses run an unofficial client "
-                    + "(\(status.packageName))."
             )
         }
 
@@ -2124,36 +2091,12 @@ private func dispatchDiscoveredDevices(_ rawSearchResults: Any?) {
         activeSession.onResults(devices)
     }
 
-    /// Used by both the native scan callback and the React Native scan wrapper.
-    func scanDiagnostic(for model: DeviceModel) -> ScanDiagnostic? {
-        let status = glassesStatus
-        guard model != .simulated, !status.connected,
-              status.connectionState != .connected, status.connectionState != .connecting,
-              status.connectionState != .bonding else { return nil }
-        let services = ConnectedDeviceMatcher.serviceUUIDs(for: model).map { CBUUID(string: $0) }
-        let saved = currentDefaultDevice()
-        guard let device = BluetoothAvailability.shared.connectedPeripherals(withServices: services).first(where: {
-            ConnectedDeviceMatcher.matches(model: model, defaultDevice: saved, name: $0.name, identifier: $0.identifier.uuidString)
-        }) else { return nil }
-        let name = device.name.flatMap { $0.isEmpty ? nil : $0 } ?? device.identifier.uuidString
-        return ScanDiagnostic(
-            code: "device_connected_on_phone",
-            message: "Scan found no glasses, but a matching device \"\(name)\" is already connected to this phone. " +
-                "If another app is using it, disconnect it there and scan again."
-        )
-    }
-
     private func finishScanSession(_ id: UUID, reason: ScanStopReason, shouldStopScan: Bool) {
         guard let activeSession = activeScanSessions.removeValue(forKey: id) else { return }
         activeSession.timeoutTask?.cancel()
         activeSession.publicSession?.markStopped()
         if shouldStopScan {
             stopScan(reason: reason)
-        }
-        if reason == .completed, activeSession.latestResults.isEmpty,
-           let onDiagnostic = activeSession.onDiagnostic, let diagnostic = scanDiagnostic(for: activeSession.model)
-        {
-            onDiagnostic(diagnostic)
         }
         activeSession.onComplete(activeSession.latestResults)
     }
