@@ -6,7 +6,6 @@
 //  Used to detect when Mentra Live glasses are paired/connected for audio
 //
 
-#if !os(macOS)
 import AVFoundation
 import Foundation
 import UIKit
@@ -282,4 +281,3 @@ class AudioSessionMonitor {
         }
     }
 }
-#endif
