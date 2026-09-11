@@ -16,6 +16,7 @@ import Combine
 import CoreBluetooth
 import Foundation
 import ImageIO
+import UIKit
 
 // MARK: - Supporting Types
 
@@ -354,11 +355,11 @@ class BlePhotoUploadService {
     }
 
     /**
-     * Decode image data (AVIF or JPEG).
+     * Decode image data (AVIF or JPEG) to UIImage.
      * AVIF arriving from glasses has a TIFF EXIF block appended to {@code mdat}; iOS ImageIO
      * rejects those bytes the same way Android does. Strip the Exif tail before decoding.
      */
-    private static func decodeImage(imageData: Data) -> SdkImage? {
+    private static func decodeImage(imageData: Data) -> UIImage? {
         let isAvif = isAvifData(imageData)
         var decodeData = imageData
         if isAvif && containsExifMarker(in: imageData) {
@@ -371,13 +372,13 @@ class BlePhotoUploadService {
             }
         }
 
-        if let image = SdkImage(data: decodeData) {
+        if let image = UIImage(data: decodeData) {
             return image
         }
 
         if isAvif {
-            if #available(iOS 16.0, macOS 13.0, *) {
-                return SdkImage(data: decodeData)
+            if #available(iOS 16.0, *) {
+                return UIImage(data: decodeData)
             } else {
                 Bridge.log("\(TAG): AVIF decoding not supported on iOS < 16")
                 return nil
@@ -497,7 +498,7 @@ class BlePhotoUploadService {
 
         request.httpBody = body
 
-        Bridge.log("LIVE: Uploading photo to webhook: \(webhookUrl)")
+        print("LIVE: Uploading photo to webhook: \(webhookUrl)")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -513,7 +514,7 @@ class BlePhotoUploadService {
                 )
             }
 
-            Bridge.log("LIVE: Upload successful. Response code: \(httpResponse.statusCode)")
+            print("LIVE: Upload successful. Response code: \(httpResponse.statusCode)")
             return String(data: data, encoding: .utf8) ?? ""
 
         } catch {
@@ -627,7 +628,7 @@ enum K900ProtocolUtils {
         // Verify packet has enough data
         let requiredLength = pos + Int(info.packSize) + LENGTH_FILE_VERIFY + LENGTH_FILE_END
         if protocolData.count < requiredLength {
-            Bridge.log(
+            print(
                 "K900ProtocolUtils: File packet too short for data. Need: \(requiredLength), Have: \(protocolData.count), packSize=\(info.packSize), pos=\(pos)"
             )
             return nil
@@ -656,11 +657,11 @@ enum K900ProtocolUtils {
         info.isValid = (calculatedVerify == info.verifyCode)
 
         if !info.isValid {
-            Bridge.log(
+            print(
                 "K900ProtocolUtils: File packet checksum failed. Expected: \(String(format: "%02X", info.verifyCode)), Calculated: \(String(format: "%02X", calculatedVerify))"
             )
         } else if shouldLogFilePacket(info) {
-            Bridge.log(
+            print(
                 "K900ProtocolUtils: File packet extracted successfully: index=\(info.packIndex), size=\(info.packSize), fileName=\(info.fileName)"
             )
         }
@@ -732,7 +733,7 @@ private struct FileTransferSession {
         if isBesLie {
             // BES lie detected: totalPackets = fileSize / 400
             newTotalPackets = fileSize / Self.BES_HARDCODED_PACK_SIZE
-            Bridge.log(
+            print(
                 "📦 BES Lie detected! fakeFileSize=\(fileSize), totalPackets=\(newTotalPackets), actualPackSize=\(actualPackSize)"
             )
         } else {
@@ -741,7 +742,7 @@ private struct FileTransferSession {
         }
 
         if newTotalPackets != totalPackets {
-            Bridge.log(
+            print(
                 "📦 Recalculating totalPackets: \(totalPackets) -> \(newTotalPackets) (packSize=\(actualPackSize), fileSize=\(fileSize))"
             )
             totalPackets = newTotalPackets
@@ -793,7 +794,7 @@ private struct FileTransferSession {
         // Calculate actual file size by summing all received packet sizes
         let actualFileSize = receivedPackets.values.reduce(0) { $0 + $1.count }
 
-        Bridge.log(
+        print(
             "📦 Assembling file: headerFileSize=\(fileSize), actualFileSize=\(actualFileSize), totalPackets=\(totalPackets)"
         )
 
@@ -1021,7 +1022,6 @@ extension MentraLive: CBCentralManagerDelegate {
         }
     }
 
-    #if !os(macOS)
     nonisolated func centralManager(
         _: CBCentralManager, didUpdateANCSAuthorizationFor peripheral: CBPeripheral
     ) {
@@ -1033,7 +1033,6 @@ extension MentraLive: CBCentralManagerDelegate {
             self.enableAncsRelayIfAuthorized()
         }
     }
-    #endif
 
     nonisolated func centralManager(
         _: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?
@@ -1382,17 +1381,6 @@ enum MentraLiveConnectionState {
     case disconnected
     case connecting
     case connected
-}
-
-enum MentraLiveConnectionOptions {
-    static func coreBluetoothOptions(requiresAncs: Bool) -> [String: Any]? {
-        #if os(macOS)
-            return nil
-        #else
-            guard requiresAncs else { return nil }
-            return [CBConnectPeripheralOptionRequiresANCS: true]
-        #endif
-    }
 }
 
 /// Type aliases for compatibility
@@ -1754,7 +1742,6 @@ class MentraLive: NSObject, SGCManager {
 
     private var connectionTimeoutTimer: Timer?
     private var reconnectionWorkItem: DispatchWorkItem?
-    private var requiresAncs = true
 
     // MARK: - Initialization
 
@@ -1785,10 +1772,6 @@ class MentraLive: NSObject, SGCManager {
 
     func cleanup() {
         destroy()
-    }
-
-    func setRequiresAncs(_ requiresAncs: Bool) {
-        self.requiresAncs = requiresAncs
     }
 
     // MARK: - React Native Interface
@@ -2460,25 +2443,19 @@ class MentraLive: NSObject, SGCManager {
         // Set connection timeout
         startConnectionTimeout()
 
-        #if os(macOS)
-        centralManager?.connect(peripheral, options: nil)
-        #else
         // ANCS is hosted by iOS and is only exposed to authorized accessories.
-        // The default requirement lets the system complete that authorization flow
-        // before the glasses subscribe; apps that do not relay notifications can opt out.
-        Bridge.log("LIVE: ANCS connection requirement \(requiresAncs ? "enabled" : "disabled")")
+        // Requiring it at connect time lets the system complete that authorization
+        // flow before the glasses subscribe to the ANCS characteristics.
         centralManager?.connect(
             peripheral,
-            options: MentraLiveConnectionOptions.coreBluetoothOptions(requiresAncs: requiresAncs)
+            options: [CBConnectPeripheralOptionRequiresANCS: true]
         )
-        #endif
     }
 
     /// Opt the firmware into ANCS only after iOS has authorized this accessory.
     /// Old firmware safely ignores the command, while new firmware stays inert
     /// for old mobile clients that never send it.
     private func enableAncsRelayIfAuthorized() {
-        #if !os(macOS)
         guard !ancsRelayEnableRequested,
               let peripheral = connectedPeripheral,
               txCharacteristic != nil,
@@ -2496,7 +2473,6 @@ class MentraLive: NSObject, SGCManager {
             ancsRelayEnableRequested = true
             Bridge.log("LIVE: Requested ANCS relay from compatible firmware")
         }
-        #endif
     }
 
     private func handleReconnection() {
@@ -3043,8 +3019,7 @@ class MentraLive: NSObject, SGCManager {
                 overallPercent: osOverallPercent,
                 status: osStatus,
                 errorMessage: osErrorMessage,
-                glassesTimeMs: glassesTimeMs > 0 ? glassesTimeMs : nil,
-                bytesDownloaded: (json["bytes_downloaded"] as? NSNumber)?.int64Value
+                glassesTimeMs: glassesTimeMs > 0 ? glassesTimeMs : nil
             )
 
         case "ota_progress":
@@ -3093,9 +3068,6 @@ class MentraLive: NSObject, SGCManager {
                 }
 
                 // Update local fields for any we recognize
-                if let packageName = nonEmptyStringValue(fields, "package_name") {
-                    DeviceStore.shared.apply("glasses", "packageName", packageName)
-                }
                 if let appVersion = fields["app_version"] as? String {
                     DeviceStore.shared.apply("glasses", "appVersion", appVersion)
                 }
@@ -3746,12 +3718,6 @@ class MentraLive: NSObject, SGCManager {
         // cannot leave a stale build number in RN (ASG is source of truth for PackageInfo).
         DeviceStore.shared.apply("glasses", "buildNumber", "")
         DeviceStore.shared.apply("glasses", "appVersion", "")
-        // packageName must clear with buildNumber: the OTA guard treats an absent package as
-        // "stock, predates the field", so a retained .thirdparty value from a previous session
-        // would permanently block OTA for the next (possibly pre-field, possibly restored stock)
-        // glasses. Both arrive together in version_info_1, so clearing them together keeps
-        // "have a build ⇒ have this session's identity" true.
-        DeviceStore.shared.apply("glasses", "packageName", "")
         DeviceStore.shared.apply("glasses", "besFirmwareVersion", "")
         DeviceStore.shared.apply("glasses", "mtkFirmwareVersion", "")
         // Modern ASG builds omit ota_version_url entirely (the phone owns manifest selection),
