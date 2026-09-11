@@ -169,17 +169,9 @@ public struct Device: Identifiable, Equatable, CustomStringConvertible {
 public struct ConnectOptions {
     public let saveAsDefault: Bool
     public let cancelExistingConnectionAttempt: Bool
-    /// Mentra Live on iOS only. Whether CoreBluetooth should require ANCS
-    /// authorization while establishing the connection.
-    public let requiresAncs: Bool
 
-    public init(
-        saveAsDefault: Bool = true,
-        cancelExistingConnectionAttempt: Bool = true,
-        requiresAncs: Bool = true
-    ) {
+    public init(saveAsDefault: Bool = true, cancelExistingConnectionAttempt: Bool = true) {
         self.saveAsDefault = saveAsDefault
         self.cancelExistingConnectionAttempt = cancelExistingConnectionAttempt
-        self.requiresAncs = requiresAncs
     }
 }

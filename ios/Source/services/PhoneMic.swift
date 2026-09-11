@@ -5,7 +5,6 @@
 //  Created on 3/8/25.
 //
 
-#if !os(macOS)
 import AVFoundation
 import Combine
 import Foundation
@@ -662,4 +661,3 @@ class PhoneMic {
         stopRecording()
     }
 }
-#endif
