@@ -4,8 +4,7 @@ import PackageDescription
 let package = Package(
   name: "MentraBluetoothSDK",
   platforms: [
-    .iOS("15.1"),
-    .macOS(.v13)
+    .iOS("15.1")
   ],
   products: [
     .library(

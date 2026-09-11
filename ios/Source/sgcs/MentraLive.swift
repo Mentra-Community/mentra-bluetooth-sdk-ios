@@ -16,6 +16,7 @@ import Combine
 import CoreBluetooth
 import Foundation
 import ImageIO
+import UIKit
 
 // MARK: - Supporting Types
 
@@ -354,11 +355,11 @@ class BlePhotoUploadService {
     }
 
     /**
-     * Decode image data (AVIF or JPEG).
+     * Decode image data (AVIF or JPEG) to UIImage.
      * AVIF arriving from glasses has a TIFF EXIF block appended to {@code mdat}; iOS ImageIO
      * rejects those bytes the same way Android does. Strip the Exif tail before decoding.
      */
-    private static func decodeImage(imageData: Data) -> SdkImage? {
+    private static func decodeImage(imageData: Data) -> UIImage? {
         let isAvif = isAvifData(imageData)
         var decodeData = imageData
         if isAvif && containsExifMarker(in: imageData) {
@@ -371,13 +372,13 @@ class BlePhotoUploadService {
             }
         }
 
-        if let image = SdkImage(data: decodeData) {
+        if let image = UIImage(data: decodeData) {
             return image
         }
 
         if isAvif {
-            if #available(iOS 16.0, macOS 13.0, *) {
-                return SdkImage(data: decodeData)
+            if #available(iOS 16.0, *) {
+                return UIImage(data: decodeData)
             } else {
                 Bridge.log("\(TAG): AVIF decoding not supported on iOS < 16")
                 return nil
@@ -497,7 +498,7 @@ class BlePhotoUploadService {
 
         request.httpBody = body
 
-        Bridge.log("LIVE: Uploading photo to webhook: \(webhookUrl)")
+        print("LIVE: Uploading photo to webhook: \(webhookUrl)")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -513,7 +514,7 @@ class BlePhotoUploadService {
                 )
             }
 
-            Bridge.log("LIVE: Upload successful. Response code: \(httpResponse.statusCode)")
+            print("LIVE: Upload successful. Response code: \(httpResponse.statusCode)")
             return String(data: data, encoding: .utf8) ?? ""
 
         } catch {
@@ -627,7 +628,7 @@ enum K900ProtocolUtils {
         // Verify packet has enough data
         let requiredLength = pos + Int(info.packSize) + LENGTH_FILE_VERIFY + LENGTH_FILE_END
         if protocolData.count < requiredLength {
-            Bridge.log(
+            print(
                 "K900ProtocolUtils: File packet too short for data. Need: \(requiredLength), Have: \(protocolData.count), packSize=\(info.packSize), pos=\(pos)"
             )
             return nil
@@ -656,11 +657,11 @@ enum K900ProtocolUtils {
         info.isValid = (calculatedVerify == info.verifyCode)
 
         if !info.isValid {
-            Bridge.log(
+            print(
                 "K900ProtocolUtils: File packet checksum failed. Expected: \(String(format: "%02X", info.verifyCode)), Calculated: \(String(format: "%02X", calculatedVerify))"
             )
         } else if shouldLogFilePacket(info) {
-            Bridge.log(
+            print(
                 "K900ProtocolUtils: File packet extracted successfully: index=\(info.packIndex), size=\(info.packSize), fileName=\(info.fileName)"
             )
         }
@@ -732,7 +733,7 @@ private struct FileTransferSession {
         if isBesLie {
             // BES lie detected: totalPackets = fileSize / 400
             newTotalPackets = fileSize / Self.BES_HARDCODED_PACK_SIZE
-            Bridge.log(
+            print(
                 "📦 BES Lie detected! fakeFileSize=\(fileSize), totalPackets=\(newTotalPackets), actualPackSize=\(actualPackSize)"
             )
         } else {
@@ -741,7 +742,7 @@ private struct FileTransferSession {
         }
 
         if newTotalPackets != totalPackets {
-            Bridge.log(
+            print(
                 "📦 Recalculating totalPackets: \(totalPackets) -> \(newTotalPackets) (packSize=\(actualPackSize), fileSize=\(fileSize))"
             )
             totalPackets = newTotalPackets
@@ -793,7 +794,7 @@ private struct FileTransferSession {
         // Calculate actual file size by summing all received packet sizes
         let actualFileSize = receivedPackets.values.reduce(0) { $0 + $1.count }
 
-        Bridge.log(
+        print(
             "📦 Assembling file: headerFileSize=\(fileSize), actualFileSize=\(actualFileSize), totalPackets=\(totalPackets)"
         )
 
@@ -1021,7 +1022,6 @@ extension MentraLive: CBCentralManagerDelegate {
         }
     }
 
-    #if !os(macOS)
     nonisolated func centralManager(
         _: CBCentralManager, didUpdateANCSAuthorizationFor peripheral: CBPeripheral
     ) {
@@ -1033,7 +1033,6 @@ extension MentraLive: CBCentralManagerDelegate {
             self.enableAncsRelayIfAuthorized()
         }
     }
-    #endif
 
     nonisolated func centralManager(
         _: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?
@@ -1382,17 +1381,6 @@ enum MentraLiveConnectionState {
     case disconnected
     case connecting
     case connected
-}
-
-enum MentraLiveConnectionOptions {
-    static func coreBluetoothOptions(requiresAncs: Bool) -> [String: Any]? {
-        #if os(macOS)
-            return nil
-        #else
-            guard requiresAncs else { return nil }
-            return [CBConnectPeripheralOptionRequiresANCS: true]
-        #endif
-    }
 }
 
 /// Type aliases for compatibility
@@ -1754,7 +1742,6 @@ class MentraLive: NSObject, SGCManager {
 
     private var connectionTimeoutTimer: Timer?
     private var reconnectionWorkItem: DispatchWorkItem?
-    private var requiresAncs = true
 
     // MARK: - Initialization
 
@@ -1785,10 +1772,6 @@ class MentraLive: NSObject, SGCManager {
 
     func cleanup() {
         destroy()
-    }
-
-    func setRequiresAncs(_ requiresAncs: Bool) {
-        self.requiresAncs = requiresAncs
     }
 
     // MARK: - React Native Interface
@@ -2460,25 +2443,19 @@ class MentraLive: NSObject, SGCManager {
         // Set connection timeout
         startConnectionTimeout()
 
-        #if os(macOS)
-        centralManager?.connect(peripheral, options: nil)
-        #else
         // ANCS is hosted by iOS and is only exposed to authorized accessories.
-        // The default requirement lets the system complete that authorization flow
-        // before the glasses subscribe; apps that do not relay notifications can opt out.
-        Bridge.log("LIVE: ANCS connection requirement \(requiresAncs ? "enabled" : "disabled")")
+        // Requiring it at connect time lets the system complete that authorization
+        // flow before the glasses subscribe to the ANCS characteristics.
         centralManager?.connect(
             peripheral,
-            options: MentraLiveConnectionOptions.coreBluetoothOptions(requiresAncs: requiresAncs)
+            options: [CBConnectPeripheralOptionRequiresANCS: true]
         )
-        #endif
     }
 
     /// Opt the firmware into ANCS only after iOS has authorized this accessory.
     /// Old firmware safely ignores the command, while new firmware stays inert
     /// for old mobile clients that never send it.
     private func enableAncsRelayIfAuthorized() {
-        #if !os(macOS)
         guard !ancsRelayEnableRequested,
               let peripheral = connectedPeripheral,
               txCharacteristic != nil,
@@ -2496,7 +2473,6 @@ class MentraLive: NSObject, SGCManager {
             ancsRelayEnableRequested = true
             Bridge.log("LIVE: Requested ANCS relay from compatible firmware")
         }
-        #endif
     }
 
     private func handleReconnection() {
@@ -2796,11 +2772,7 @@ class MentraLive: NSObject, SGCManager {
             // Record the session id BEFORE marking ready: an unsolicited glasses_ready
             // already runs this full remote-reset flow, so recording (not re-triggering)
             // is correct here; version_info detection covers the restart case.
-            glassesSessionId = (json["sid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            Bridge.sendTypedMessage(
-                "wifi_protocol_session_ready",
-                body: ["sid": glassesSessionId ?? ""]
-            )
+            if let sid = json["sid"] as? String, !sid.isEmpty { glassesSessionId = sid }
             readinessCompletedThisBleSession = true
             handleGlassesReady()
 
@@ -2837,33 +2809,6 @@ class MentraLive: NSObject, SGCManager {
                 DeviceStore.shared.apply("glasses", "wifiError", "")
             }
             updateWifiStatus(connected: connected, ssid: ssid, ip: ip, error: wifiError.isEmpty ? nil : wifiError)
-
-        case "wifi_forget_result":
-            guard wifiResponseEnvelopeIsValid(json, allowLegacy: true) else { return }
-            Bridge.sendWifiForgetResult(
-                requestId: json["requestId"] as? String ?? "",
-                sid: json["sid"] as? String ?? "",
-                ssid: json["ssid"] as? String ?? "",
-                protocolVersion: (json["protocol_version"] as? NSNumber)?.intValue ?? 0,
-                outcome: json["outcome"] as? String ?? "",
-                legacyDispatched: json["dispatched"] as? Bool,
-                connected: json["connected"] as? Bool,
-                currentSsid: json["current_ssid"] as? String ?? "",
-                localIp: json["local_ip"] as? String ?? "",
-                error: (json["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            )
-
-        case "saved_wifi_networks":
-            guard wifiResponseEnvelopeIsValid(json, allowLegacy: false) else { return }
-            guard let networks = json["networks"] as? [String] else { return }
-            Bridge.sendSavedWifiNetworks(
-                requestId: json["requestId"] as? String ?? "",
-                sid: json["sid"] as? String ?? "",
-                protocolVersion: (json["protocol_version"] as? NSNumber)?.intValue ?? 0,
-                outcome: json["outcome"] as? String ?? "",
-                networks: networks,
-                error: (json["error"] as? String).flatMap { $0.isEmpty ? nil : $0 }
-            )
 
         case "hotspot_status_update":
             let enabled = json["hotspot_enabled"] as? Bool ?? false
@@ -2973,7 +2918,7 @@ class MentraLive: NSObject, SGCManager {
             Bridge.log("LIVE: Received pong response - connection healthy")
 
         case "entering_pairing_mode":
-            let windowMs = max(5000, min(180_000, json["window_ms"] as? Int ?? 120_000))
+            let windowMs = max(5_000, min(180_000, json["window_ms"] as? Int ?? 120_000))
             Bridge.log("LIVE: Glasses entering pairing mode — yield \(windowMs)ms (no forget)")
             enterPairingYield(windowMs: windowMs)
             let body: [String: Any] = [
@@ -3074,8 +3019,7 @@ class MentraLive: NSObject, SGCManager {
                 overallPercent: osOverallPercent,
                 status: osStatus,
                 errorMessage: osErrorMessage,
-                glassesTimeMs: glassesTimeMs > 0 ? glassesTimeMs : nil,
-                bytesDownloaded: (json["bytes_downloaded"] as? NSNumber)?.int64Value
+                glassesTimeMs: glassesTimeMs > 0 ? glassesTimeMs : nil
             )
 
         case "ota_progress":
@@ -3117,7 +3061,6 @@ class MentraLive: NSObject, SGCManager {
 
                 // Extract all fields from JSON (except "type")
                 var fields: [String: Any] = [:]
-                fields["version_info_type"] = type
                 for (key, value) in json {
                     if key != "type" {
                         fields[key] = value
@@ -3125,9 +3068,6 @@ class MentraLive: NSObject, SGCManager {
                 }
 
                 // Update local fields for any we recognize
-                if let packageName = nonEmptyStringValue(fields, "package_name") {
-                    DeviceStore.shared.apply("glasses", "packageName", packageName)
-                }
                 if let appVersion = fields["app_version"] as? String {
                     DeviceStore.shared.apply("glasses", "appVersion", appVersion)
                 }
@@ -3189,7 +3129,7 @@ class MentraLive: NSObject, SGCManager {
                 maybeSendWireHandshake()
                 handleGlassesSessionId(json)
 
-                Bridge.sendVersionInfo(fields, responseChunk: type)
+                Bridge.sendVersionInfo(fields)
             } else {
                 Bridge.log("Unhandled message type: \(type)")
             }
@@ -3679,67 +3619,19 @@ class MentraLive: NSObject, SGCManager {
     }
 
     func forgetWifiNetwork(_ ssid: String) {
-        forgetWifiNetwork(ssid, requestId: nil, sid: nil)
-    }
+        Bridge.log("LIVE: 📶 Sending WiFi forget command for SSID: \(ssid)")
 
-    @discardableResult func forgetWifiNetwork(_ ssid: String, requestId: String?, sid: String?) -> Bool {
-        guard let peripheral = connectedPeripheral, peripheral.state == .connected, txCharacteristic != nil,
-              (requestId == nil) == (sid == nil)
-        else { return false }
-        if let requestId, let sid, requestId.isEmpty || sid.isEmpty { return false }
-        transportLog("LIVE: 📶 Sending WiFi forget command for SSID: \(ssid)", bridgeLogging: false)
-
-        guard !ssid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            transportLog("LIVE: Cannot forget WiFi network - SSID is empty", bridgeLogging: false)
-            if let requestId {
-                Bridge.sendWifiForgetResult(
-                    requestId: requestId,
-                    sid: sid ?? "",
-                    ssid: ssid,
-                    protocolVersion: 1,
-                    outcome: "failed",
-                    legacyDispatched: nil,
-                    connected: nil,
-                    currentSsid: "",
-                    localIp: "",
-                    error: "invalid_ssid"
-                )
-            }
-            return false
+        guard !ssid.isEmpty else {
+            Bridge.log("LIVE: Cannot forget WiFi network - SSID is empty")
+            return
         }
 
-        var json: [String: Any] = [
+        let json: [String: Any] = [
             "type": "forget_wifi",
             "ssid": ssid,
         ]
-        if let requestId, !requestId.isEmpty {
-            json["requestId"] = requestId
-        }
-        if let sid, !sid.isEmpty {
-            json["sid"] = sid
-            json["protocolVersion"] = 1
-        }
 
-        // The coordinator dispatches while isolated on MainActor. Keep this path native-only so a
-        // public log delegate cannot synchronously reset the session before the payload is queued.
-        return sendJson(json, wakeUp: true, requireAck: true, bridgeLogging: false)
-    }
-
-    @discardableResult func requestSavedWifiNetworks(requestId: String, sid: String) -> Bool {
-        guard let peripheral = connectedPeripheral, peripheral.state == .connected, txCharacteristic != nil,
-              !requestId.isEmpty, !sid.isEmpty
-        else { return false }
-        var command: [String: Any] = ["type": "request_saved_wifi_networks", "requestId": requestId]
-        command["protocolVersion"] = 1
-        if !sid.isEmpty {
-            command["sid"] = sid
-        }
-        return sendJson(
-            command,
-            wakeUp: true,
-            requireAck: true,
-            bridgeLogging: false
-        )
+        sendJson(json, wakeUp: true)
     }
 
     func queryGalleryStatus() {
@@ -3826,12 +3718,6 @@ class MentraLive: NSObject, SGCManager {
         // cannot leave a stale build number in RN (ASG is source of truth for PackageInfo).
         DeviceStore.shared.apply("glasses", "buildNumber", "")
         DeviceStore.shared.apply("glasses", "appVersion", "")
-        // packageName must clear with buildNumber: the OTA guard treats an absent package as
-        // "stock, predates the field", so a retained .thirdparty value from a previous session
-        // would permanently block OTA for the next (possibly pre-field, possibly restored stock)
-        // glasses. Both arrive together in version_info_1, so clearing them together keeps
-        // "have a build ⇒ have this session's identity" true.
-        DeviceStore.shared.apply("glasses", "packageName", "")
         DeviceStore.shared.apply("glasses", "besFirmwareVersion", "")
         DeviceStore.shared.apply("glasses", "mtkFirmwareVersion", "")
         // Modern ASG builds omit ota_version_url entirely (the phone owns manifest selection),
@@ -4902,31 +4788,20 @@ class MentraLive: NSObject, SGCManager {
         wireBytes: Int,
         packetCount: Int,
         protocolVersion: Int,
-        direction: String,
-        bridgeLogging: Bool = true
+        direction: String
     ) {
-        transportLog(
-            "BLE_TRACE direction=\(direction) proto=v\(protocolVersion) payload=\(payloadBytes) wire=\(wireBytes) packets=\(packetCount)",
-            bridgeLogging: bridgeLogging
+        Bridge.log(
+            "BLE_TRACE direction=\(direction) proto=v\(protocolVersion) payload=\(payloadBytes) wire=\(wireBytes) packets=\(packetCount)"
         )
     }
 
-    private func transportLog(_ message: String, bridgeLogging: Bool) {
-        if bridgeLogging {
-            Bridge.log(message)
-        } else {
-            NSLog("%@", message)
-        }
-    }
-
-    @discardableResult private func sendJsonBinary(
+    private func sendJsonBinary(
         jsonString: String,
         messageId: Int64,
         trackingId: String,
         wakeUp: Bool,
-        requireAck: Bool,
-        bridgeLogging: Bool
-    ) -> Bool {
+        requireAck: Bool
+    ) {
         let payload = Data(jsonString.utf8)
         let msgId = UInt16(truncatingIfNeeded: messageId)
         let fragments = MessageChunker.createBinaryFragments(
@@ -4936,8 +4811,8 @@ class MentraLive: NSObject, SGCManager {
             ackRequested: requireAck && messageId >= 0
         )
         guard !fragments.isEmpty else {
-            transportLog("LIVE: Failed to create binary wire fragments", bridgeLogging: bridgeLogging)
-            return false
+            Bridge.log("LIVE: Failed to create binary wire fragments")
+            return
         }
 
         var totalWireBytes = 0
@@ -4949,7 +4824,7 @@ class MentraLive: NSObject, SGCManager {
                 fragCount: fragment.fragCount,
                 payload: fragment.payload
             ) else {
-                return false
+                continue
             }
             totalWireBytes += packed.count
             let isFinalChunk = index == fragments.count - 1
@@ -4966,30 +4841,12 @@ class MentraLive: NSObject, SGCManager {
             wireBytes: totalWireBytes,
             packetCount: fragments.count,
             protocolVersion: BleWireProtocol.protocolV2,
-            direction: "phone_to_glasses",
-            bridgeLogging: bridgeLogging
+            direction: "phone_to_glasses"
         )
-        transportLog(
-            "LIVE: Binary v2 queued \(fragments.count) fragments, wireBytes=\(totalWireBytes)",
-            bridgeLogging: bridgeLogging
-        )
-        return true
+        Bridge.log("LIVE: Binary v2 queued \(fragments.count) fragments, wireBytes=\(totalWireBytes)")
     }
 
-    func sendJson(
-        _ jsonOriginal: [String: Any],
-        wakeUp: Bool = false,
-        requireAck: Bool = true
-    ) {
-        sendJson(jsonOriginal, wakeUp: wakeUp, requireAck: requireAck, bridgeLogging: true)
-    }
-
-    @discardableResult private func sendJson(
-        _ jsonOriginal: [String: Any],
-        wakeUp: Bool,
-        requireAck: Bool,
-        bridgeLogging: Bool
-    ) -> Bool {
+    func sendJson(_ jsonOriginal: [String: Any], wakeUp: Bool = false, requireAck: Bool = true) {
         do {
             var json = jsonOriginal
             var messageId: Int64 = -1
@@ -5013,14 +4870,14 @@ class MentraLive: NSObject, SGCManager {
                 )
 
                 if useBinaryWireProtocol, isNewVersion {
-                    return sendJsonBinary(
+                    sendJsonBinary(
                         jsonString: jsonString,
                         messageId: messageId,
                         trackingId: trackingId,
                         wakeUp: wakeUp,
-                        requireAck: requireAck,
-                        bridgeLogging: bridgeLogging
+                        requireAck: requireAck
                     )
+                    return
                 }
 
                 // First check if the message needs chunking
@@ -5034,20 +4891,17 @@ class MentraLive: NSObject, SGCManager {
 
                 // Check if chunking is needed
                 if MessageChunker.needsChunking(testWrappedJson) {
-                    transportLog("LIVE: Message exceeds threshold, chunking required", bridgeLogging: bridgeLogging)
+                    Bridge.log("LIVE: Message exceeds threshold, chunking required")
 
                     // Create chunks
                     let chunks = MessageChunker.createChunks(
                         originalJson: jsonString, messageId: messageId, wakeUp: wakeUp
                     )
                     guard !chunks.isEmpty else {
-                        transportLog(
-                            "LIVE: Failed to create BLE chunks within K900 packet limit",
-                            bridgeLogging: bridgeLogging
-                        )
-                        return false
+                        Bridge.log("LIVE: Failed to create BLE chunks within K900 packet limit")
+                        return
                     }
-                    transportLog("LIVE: Sending \(chunks.count) chunks", bridgeLogging: bridgeLogging)
+                    Bridge.log("LIVE: Sending \(chunks.count) chunks")
 
                     // Send each chunk
                     for (index, chunk) in chunks.enumerated() {
@@ -5055,11 +4909,7 @@ class MentraLive: NSObject, SGCManager {
                         if let chunkStr = String(data: chunkData, encoding: .utf8) {
                             // Pack each chunk using the normal K900 protocol
                             let packedData =
-                                packJson(
-                                    chunkStr,
-                                    wakeUp: wakeUp && index == 0,
-                                    bridgeLogging: bridgeLogging
-                                ) ?? Data() // Only wakeup on first chunk
+                                packJson(chunkStr, wakeUp: wakeUp && index == 0) ?? Data() // Only wakeup on first chunk
 
                             // Queue the chunk for sending
                             // Only track ACK for the final chunk (which has the mId)
@@ -5080,7 +4930,6 @@ class MentraLive: NSObject, SGCManager {
                                 "chunkJsonBytes": chunkStr.data(using: .utf8)?.count,
                                 "messageBytes": jsonData.count,
                             ])
-                            guard !packedData.isEmpty else { return false }
                             queueSend(packedData, id: chunkTrackingId, trace: trace)
 
                             // Add small delay between chunks to avoid overwhelming the connection
@@ -5090,22 +4939,14 @@ class MentraLive: NSObject, SGCManager {
                         }
                     }
 
-                    transportLog("LIVE: All chunks queued for transmission", bridgeLogging: bridgeLogging)
+                    Bridge.log("LIVE: All chunks queued for transmission")
                 } else {
                     // Normal single message transmission
                     if (json["type"] as? String) == "take_photo" {
-                        transportLog(
-                            "LIVE: PHOTO PIPELINE BLE handoff — sendJson -> queueSend take_photo",
-                            bridgeLogging: bridgeLogging
-                        )
+                        Bridge.log("LIVE: PHOTO PIPELINE BLE handoff — sendJson -> queueSend take_photo")
                     }
-                    transportLog("LIVE: Sending data to glasses: \(jsonString)", bridgeLogging: bridgeLogging)
-                    let packedData =
-                        packJson(
-                            jsonString,
-                            wakeUp: wakeUp,
-                            bridgeLogging: bridgeLogging
-                        ) ?? Data()
+                    Bridge.log("LIVE: Sending data to glasses: \(jsonString)")
+                    let packedData = packJson(jsonString, wakeUp: wakeUp) ?? Data()
                     let trace = createBleWriteTrace(
                         commandInfo: commandInfo,
                         chunkId: nil,
@@ -5119,15 +4960,12 @@ class MentraLive: NSObject, SGCManager {
                     logBleChunkTrace("created", trace, extra: [
                         "messageBytes": jsonData.count,
                     ])
-                    guard !packedData.isEmpty else { return false }
                     queueSend(packedData, id: trackingId, trace: trace)
                 }
-                return true
             }
         } catch {
-            transportLog("LIVE: Error creating JSON: \(error)", bridgeLogging: bridgeLogging)
+            Bridge.log("LIVE: Error creating JSON: \(error)")
         }
-        return false
     }
 
     // MARK: - Status Requests
@@ -5154,14 +4992,7 @@ class MentraLive: NSObject, SGCManager {
     }
 
     func requestVersionInfo() {
-        requestVersionInfo(requestId: nil)
-    }
-
-    func requestVersionInfo(requestId: String?) {
-        var json: [String: Any] = ["type": "request_version"]
-        if let requestId {
-            json["request_id"] = requestId
-        }
+        let json: [String: Any] = ["type": "request_version"]
         sendJson(json)
     }
 
@@ -6118,11 +5949,7 @@ extension MentraLive {
      * 1. Wrap with C-field: {"C": jsonData}
      * 2. Then pack with BES2700 protocol using little-endian: ## + type + length + {"C": jsonData} + $$
      */
-    private func packJson(
-        _ jsonData: String?,
-        wakeUp: Bool = false,
-        bridgeLogging: Bool = true
-    ) -> Data? {
+    private func packJson(_ jsonData: String?, wakeUp: Bool = false) -> Data? {
         guard let jsonData else { return nil }
 
         do {
@@ -6145,10 +5972,7 @@ extension MentraLive {
             )
 
         } catch {
-            transportLog(
-                "Error creating JSON wrapper for K900: \(error)",
-                bridgeLogging: bridgeLogging
-            )
+            Bridge.log("Error creating JSON wrapper for K900: \(error)")
             return nil
         }
     }
