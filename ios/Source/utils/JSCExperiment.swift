@@ -62,7 +62,8 @@ private func jlog(_ message: String) {
     /// is fully booted (RN bridge up, Metro pull done if dev, etc).
     @objc static func maybeAutoBenchmark() {
         guard ProcessInfo.processInfo.environment["MENTRA_RUN_JSC_BENCH"] != nil else { return }
-        jlog("🧪 MENTRA_RUN_JSC_BENCH set — auto-running benchmark in 5s")
+        os_log("🧪 MENTRA_RUN_JSC_BENCH set — auto-running benchmark in 5s",
+               log: jscLog, type: .info)
         DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 5.0) {
             runBenchmark()
         }
@@ -101,7 +102,7 @@ private func jlog(_ message: String) {
             ctx.name = "MentraJS: \(id)"
             // Inspectable in dev builds only. iOS 16.4+ guarded.
             #if DEBUG
-                if #available(iOS 16.4, macOS 13.3, *) {
+                if #available(iOS 16.4, *) {
                     ctx.isInspectable = true
                 }
             #endif
