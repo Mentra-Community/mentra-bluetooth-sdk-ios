@@ -1,8 +1,6 @@
 import Foundation
 import os.log
-#if canImport(UIKit)
 import UIKit
-#endif
 
 enum BleTraceLogger {
     private static let log = OSLog(subsystem: "com.mentra.bluetoothsdk", category: "MentraBleTrace")
@@ -68,14 +66,9 @@ enum BleTraceLogger {
             "event": event,
             "component": component,
             "pid": ProcessInfo.processInfo.processIdentifier,
+            "model": UIDevice.current.model,
+            "systemVersion": UIDevice.current.systemVersion,
         ]
-        #if os(macOS)
-        payload["model"] = "Mac"
-        payload["systemVersion"] = ProcessInfo.processInfo.operatingSystemVersionString
-        #else
-        payload["model"] = UIDevice.current.model
-        payload["systemVersion"] = UIDevice.current.systemVersion
-        #endif
         for (key, value) in extra {
             payload[key] = value
         }
@@ -84,9 +77,6 @@ enum BleTraceLogger {
 
     private static func emit(_ line: String) {
         os_log("%{public}@", log: log, type: .info, line)
-        // Log events are excluded from tracing in Bridge, so forwarding a trace
-        // cannot recursively generate another trace.
-        Bridge.sendTypedMessage("log", body: ["message": line])
     }
 
     private static func format(
