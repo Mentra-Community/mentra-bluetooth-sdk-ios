@@ -13,7 +13,7 @@ struct AiResponseToG1Model {
     var newScreen: Bool
     var currentPage: UInt8 {
         didSet {
-            Bridge.log("SET : currentPage :\(currentPage)")
+            print("SET : currentPage :\(currentPage)")
         }
     }
 
