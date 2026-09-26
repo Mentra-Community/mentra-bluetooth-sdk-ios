@@ -7,8 +7,8 @@
 
 import Combine
 import CoreBluetooth
-import CoreGraphics
 import Foundation
+import CoreGraphics
 
 extension Data {
     func chunked(into size: Int) -> [Data] {
@@ -232,8 +232,7 @@ actor ReconnectionManager {
     }
 
     func start(onAttempt: @escaping @Sendable () async -> Bool) {
-        // Multiple command failures must not restart the delay between attempts.
-        guard !isRunning else { return }
+        stop()
         attempts = 0
 
         task = Task {
@@ -258,9 +257,6 @@ actor ReconnectionManager {
                 } catch {
                     break
                 }
-            }
-            if !Task.isCancelled {
-                task = nil
             }
         }
     }
@@ -316,7 +312,7 @@ class G1: NSObject, SGCManager {
 
     func queryGalleryStatus() {}
 
-    func sendOtaStart(otaVersionUrl _: String?) {}
+    func sendOtaStart(otaVersionUrl: String?) {}
     func sendOtaQueryStatus() {}
 
     func ping() {}
@@ -454,12 +450,13 @@ class G1: NSObject, SGCManager {
     }
 
     private var centralManager: CBCentralManager?
-    private var scanRequested = false
 
     private var leftPeripheral: CBPeripheral?
     private var rightPeripheral: CBPeripheral?
     private var connectedDevices: [String: (CBPeripheral?, CBPeripheral?)] = [:]
     var lastConnectionTimestamp: Date = .distantPast
+    private var leftInitialized: Bool = false
+    private var rightInitialized: Bool = false
 
     private var leftGlassUUID: UUID? {
         get {
@@ -504,8 +501,6 @@ class G1: NSObject, SGCManager {
     }
 
     func forget() {
-        isDisconnecting = true
-        stopScan()
         Task {
             await heartbeatManager.stop()
             await reconnectionManager.stop()
@@ -709,13 +704,11 @@ class G1: NSObject, SGCManager {
 
     func connectById(_ id: String) {
         DEVICE_SEARCH_ID = "_" + id + "_"
-        scanRequested = true
         startScan()
     }
 
     func findCompatibleDevices() {
         DEVICE_SEARCH_ID = "NOT_SET"
-        scanRequested = true
         startScan()
     }
 
@@ -743,7 +736,8 @@ class G1: NSObject, SGCManager {
         )
         stopScan()
 
-        // Battery requests start after both arms acknowledge initialization.
+        // get battery status:
+        getBatteryStatus()
         return true
     }
 
@@ -991,15 +985,11 @@ class G1: NSObject, SGCManager {
         connected = leftReady && rightReady
         if fullyBooted {
             stopReconnectionTimer()
-            if !prevLeftReady || !prevRightReady {
-                getBatteryStatus()
-            }
         }
     }
 
     func stopScan() {
-        scanRequested = false
-        centralManager?.stopScan()
+        centralManager!.stopScan()
         Bridge.log("G1: Stopped scanning for devices")
     }
 
@@ -1021,7 +1011,6 @@ class G1: NSObject, SGCManager {
 
     func disconnect() {
         isDisconnecting = true
-        stopScan()
         leftGlassUUID = nil
         rightGlassUUID = nil
         stopReconnectionTimer()
@@ -1053,13 +1042,10 @@ class G1: NSObject, SGCManager {
             let data = Data(chunks[0])
             // CoreCommsService.log("SEND (\(side)) \(data.hexEncodedString())")
 
-            // A queued command can outlive the link that enqueued it. Missing
-            // transport during discovery/pairing is not an ACK timeout and must
-            // not start a reconnect loop before CoreBluetooth finishes connecting.
-            let peripheral = side == "L" ? leftPeripheral : rightPeripheral
-            guard !isDisconnecting, peripheral?.state == .connected,
-                  getWriteCharacteristic(for: peripheral) != nil
-            else { return }
+            if isDisconnecting {
+                // forget whatever we were doing since we're disconnecting:
+                break
+            }
 
             for i in 0 ..< chunks.count - 1 {
                 let chunk = chunks[i]
@@ -1520,9 +1506,18 @@ extension G1 {
     /// don't call semaphore signals here as it's handled elswhere:
     private func handleInitResponse(from peripheral: CBPeripheral, success: Bool) {
         if peripheral == leftPeripheral {
-            setReadiness(left: success, right: nil)
+            leftInitialized = success
+            // CoreCommsService.log("G1: Left arm initialized: \(success)")
+            setReadiness(left: true, right: nil)
         } else if peripheral == rightPeripheral {
-            setReadiness(left: nil, right: success)
+            rightInitialized = success
+            // CoreCommsService.log("G1: Right arm initialized: \(success)")
+            setReadiness(left: nil, right: true)
+        }
+
+        // Only proceed if both glasses are initialized
+        if leftInitialized, rightInitialized {
+            setReadiness(left: true, right: true)
         }
     }
 
@@ -1742,7 +1737,6 @@ extension G1 {
     }
 
     func getBatteryStatus() {
-        guard !isDisconnecting, leftReady, rightReady else { return }
         Bridge.log("G1: getBatteryStatus()")
         let command: [UInt8] = [Commands.BLE_REQ_BATTERY.rawValue, 0x01]
         queueChunks([command])
@@ -2374,7 +2368,6 @@ extension G1: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     private func startReconnectionTimer() {
         Task {
-            guard !isDisconnecting else { return }
             await reconnectionManager.start { [weak self] in
                 guard let self else { return false }
 
@@ -2388,8 +2381,6 @@ extension G1: CBCentralManagerDelegate, CBPeripheralDelegate {
 
                 // Attempt to reconnect
                 await MainActor.run {
-                    guard !self.isDisconnecting else { return }
-                    self.scanRequested = true
                     self.startScan()
                 }
 
@@ -2526,24 +2517,18 @@ extension G1: CBCentralManagerDelegate, CBPeripheralDelegate {
     /// called whenever bluetooth is initialized / turned on or off:
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         DispatchQueue.main.async { [weak self] in
-            self?.handleBluetoothState(central.state)
-        }
-    }
+            guard let self = self else { return }
 
-    func handleBluetoothState(_ state: CBManagerState) {
-        if state == .poweredOn {
-            Bridge.log("G1: Bluetooth was powered on")
-            setReadiness(left: false, right: false)
+            if central.state == .poweredOn {
+                Bridge.log("G1: Bluetooth was powered on")
+                self.setReadiness(left: false, right: false)
 
-            // Discovery has no search ID, but still needs to resume after the
-            // central manager's initial .unknown state. Preserve selected-pair
-            // reconnects after a power cycle, unless intentionally disconnected.
-            let hasConnectionTarget = DEVICE_SEARCH_ID != "NOT_SET" && !DEVICE_SEARCH_ID.isEmpty
-            if !isDisconnecting, scanRequested || hasConnectionTarget {
-                startScan()
+                if self.DEVICE_SEARCH_ID != "NOT_SET", !self.DEVICE_SEARCH_ID.isEmpty {
+                    self.startScan()
+                }
+            } else {
+                Bridge.log("G1: Bluetooth was turned off.")
             }
-        } else {
-            Bridge.log("G1: Bluetooth was turned off.")
         }
     }
 
