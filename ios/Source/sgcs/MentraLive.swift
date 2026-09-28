@@ -5223,11 +5223,7 @@ class MentraLive: NSObject, SGCManager {
                             bridgeLogging: bridgeLogging
                         )
                     }
-                    // Wi-Fi credentials are sent unchanged but never logged; the BLE trace
-                    // above records this command with the password redacted.
-                    let loggedPayload = json["password"] == nil
-                        ? jsonString : "<\(commandInfo.commandType) with credentials omitted>"
-                    transportLog("LIVE: Sending data to glasses: \(loggedPayload)", bridgeLogging: bridgeLogging)
+                    transportLog("LIVE: Sending data to glasses: \(jsonString)", bridgeLogging: bridgeLogging)
                     let packedData =
                         packJson(
                             jsonString,
@@ -7488,7 +7484,7 @@ extension MentraLive {
             if fps > 0 { settings["fps"] = fps }
             json["settings"] = settings
         }
-        sendJson(json)
+        sendJson(json, wakeUp: true)
     }
 
     func stopVideoRecording(requestId: String) {
@@ -7503,7 +7499,7 @@ extension MentraLive {
         sendJson([
             "type": "get_video_recording_status",
             "requestId": requestId,
-        ])
+        ], wakeUp: true)
     }
 
     func stopVideoRecording(requestId: String, webhookUrl: String?, authToken: String?) {
@@ -7528,7 +7524,7 @@ extension MentraLive {
         if let authToken, !authToken.isEmpty {
             json["authToken"] = authToken
         }
-        sendJson(json)
+        sendJson(json, wakeUp: true)
     }
 }
 
