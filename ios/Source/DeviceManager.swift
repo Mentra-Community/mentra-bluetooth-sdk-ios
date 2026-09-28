@@ -318,9 +318,9 @@ struct ViewState {
     var lc3Converter: PcmConverter?
     /// Audio output format - defaults to LC3 for bandwidth savings
     private var audioOutputFormat: AudioOutputFormat = .lc3
-    private var micWatchdog = GlassesMicWatchdog()
-    // Injectable monotonic clock so recovery deadlines can be tested without sleeping.
-    var micWatchdogNow: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// Last time we received an LC3 frame from the glasses (used by the mic
+    /// inactivity watchdog).
+    private var lastLc3Event: Date?
     private var sequenceGapEvents: Int64 = 0
     private var decodeFailures: Int64 = 0
     private var lastLc3ReceivedAt: Int64?
@@ -472,15 +472,8 @@ struct ViewState {
     }
 
     func reportGlassesAudioActivity() {
-        micWatchdog.receivedAudio(at: micWatchdogNow())
+        lastLc3Event = Date()
         lastPcmProducedAt = nowMs()
-    }
-
-    /// Decoded glasses audio must update recovery health; phone PCM must not.
-    func handleGlassesPcm(_ pcmData: Data) {
-        guard !pcmData.isEmpty else { return }
-        reportGlassesAudioActivity()
-        handlePcm(pcmData)
     }
 
     private func micHealth() -> MicHealth {
@@ -506,13 +499,13 @@ struct ViewState {
         lastLc3ReceivedAt = nil
         lastPcmProducedAt = nil
         lastLc3Sequence = nil
-        micWatchdog = GlassesMicWatchdog()
+        lastLc3Event = nil
     }
 
     private func recordLc3Packet(sequenceNumber: Int?) {
         let receivedAt = nowMs()
         lastLc3ReceivedAt = receivedAt
-        micWatchdog.receivedAudio(at: micWatchdogNow())
+        lastLc3Event = Date()
         var hasGap = false
         if let sequenceNumber {
             let normalized = sequenceNumber & 0xFF
@@ -612,7 +605,6 @@ struct ViewState {
         }
 
         currentMic = micUsed
-        updateGlassesMicExpectation()
 
         // log if no mic was found:
         if micUsed == "" && micEnabled {
@@ -731,7 +723,6 @@ struct ViewState {
             Bridge.log("MAN: Manager already initialized, cleaning up previous sgc")
             sgc?.cleanup()
             sgc = nil
-            DeviceStore.shared.apply("glasses", "micEnabled", false)
             resetSystemTimeSync()
         }
 
@@ -911,20 +902,27 @@ struct ViewState {
         return result
     }
 
-    private func updateGlassesMicExpectation() {
-        // Demand/route and device readiness decide whether audio is expected. The
-        // shared micEnabled flag alone is not evidence of a running hardware stream.
-        let expected = micEnabled && currentMic == MicTypes.GLASSES_CUSTOM
-            && sgc?.fullyBooted == true && sgc?.hasMic == true
-            && sgc?.isMicSuspendedForAudio != true
-            && !PhoneAudioMonitor.getInstance().isOwnAppAudioPlaying()
-        micWatchdog.expectAudio(expected, at: micWatchdogNow())
-    }
+    private func checkAndReinitGlassesMic() {
+        // if the glasses mic is marked as enabled (and the glasses are connected), but our last known lc3 event is from > 5 seconds ago, reinitialize the mic:
+        let glassesMicEnabled = DeviceStore.shared.get("glasses", "micEnabled") as? Bool ?? false
+        let glassesConnected = DeviceStore.shared.get("glasses", "connected") as? Bool ?? false
+        if !glassesMicEnabled || !glassesConnected {
+            return
+        }
 
-    func checkAndReinitGlassesMic() {
-        updateGlassesMicExpectation()
-        if micWatchdog.shouldRetry(at: micWatchdogNow()) {
-            Bridge.log("MAN: Expected glasses audio missing for 5 seconds; retrying mic start")
+        if sgc?.isMicSuspendedForAudio == true {
+            Bridge.log("MAN: Glasses mic intentionally suspended for phone audio; skipping mic recovery")
+            return
+        }
+
+        if PhoneAudioMonitor.getInstance().isOwnAppAudioPlaying() {
+            Bridge.log("MAN: Mentra audio is playing; skipping glasses mic recovery")
+            return
+        }
+
+        let timeSinceLastLc3Event = Date().timeIntervalSince(lastLc3Event ?? Date())
+        if timeSinceLastLc3Event > 5 {
+            Bridge.log("MAN: No audio activity in the last 5 seconds from glasses, reinitializing glasses mic")
             sgc?.setMicEnabled(true)
         }
     }
@@ -1067,11 +1065,6 @@ struct ViewState {
         }
         #endif
         checkCurrentAudioDevice()
-
-        // Disconnect clears micEnabled but preserves the consumers' audio requests.
-        // Recompute demand before selecting a microphone; unchanged requests are
-        // deduplicated by DeviceStore.apply().
-        setMicState()
 
         // save the default_wearable now that we're connected:
         Bridge.saveSetting("default_wearable", defaultWearable)
@@ -1542,7 +1535,7 @@ struct ViewState {
     }
 
     func sendWifiCredentials(_ ssid: String, _ password: String) {
-        Bridge.log("MAN: Sending wifi credentials: \(ssid) \(password)")
+        Bridge.log("MAN: Sending wifi credentials: \(ssid)")
         sgc?.sendWifiCredentials(ssid, password)
     }
 
@@ -1967,9 +1960,6 @@ struct ViewState {
         sgc?.clearDisplay() // clear the screen
         sgc?.disconnect()
         sgc = nil // Clear the SGC reference after disconnect
-        // This cache belongs to the discarded connection. Keep consumer demand,
-        // but require a new mic-enable command when replacement glasses are ready.
-        DeviceStore.shared.apply("glasses", "micEnabled", false)
         resetSystemTimeSync()
         resetMicHealth()
         searching = false
