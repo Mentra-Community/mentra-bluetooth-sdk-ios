@@ -123,7 +123,6 @@ struct GlassesStatus: CustomStringConvertible {
             "wifiLocalIp": "",
             "signalStrength": -1,
             "signalStrengthUpdatedAt": 0,
-            "g2MissingArm": NSNull(),
         ]))
     }
 
