@@ -21,7 +21,6 @@ final class NimoCanvasCoordinator {
     private let rejected: (Int) -> Void
     private let session = NimoCanvasSession()
     private var flight: Flight?
-    private var cancelRetry: (() -> Void)?
     private var cancelDeadline: (() -> Void)?
 
     init(schedule: @escaping NimoScheduler, writeCapacity: @escaping () -> Int,
@@ -36,26 +35,23 @@ final class NimoCanvasCoordinator {
         run(session.offer(bytes, scope: scope, force: force))
     }
 
-    func activate() {
-        run(session.activate())
-    }
-
     func readiness(_ value: Bool, confirmed: Bool = false) {
-        if !value { cancelRetry?(); cancelRetry = nil }
         run(session.readiness(value, confirmed: confirmed))
     }
 
     func exit() {
-        cancelRetry?(); cancelRetry = nil
         run(session.exit())
     }
 
-    func nativeApp(_ appId: Int, entered: Bool) {
+    /// An expected Exit report must not discard a newer host encode queued behind Exit.
+    func nativeApp(_ appId: Int, entered: Bool) -> Bool {
+        let takeover = (appId == NimoCanvasCodec.appId && !entered) || (appId != NimoCanvasCodec.appId && entered)
+        let expectedExit = appId == NimoCanvasCodec.appId && !entered && flight?.key == 3
         run(session.nativeApp(appId, entered: entered))
+        return takeover && !expectedExit
     }
 
     func disconnected() {
-        cancelRetry?(); cancelRetry = nil
         cancelDeadline?(); cancelDeadline = nil
         flight = nil
         session.disconnected()
@@ -76,7 +72,6 @@ final class NimoCanvasCoordinator {
         for action in actions {
             switch action {
             case let .send(key, frame, ticket):
-                cancelRetry?(); cancelRetry = nil
                 cancelDeadline?()
                 let current = Flight(key: key)
                 flight = current
@@ -98,16 +93,7 @@ final class NimoCanvasCoordinator {
                     disconnected(); reconnect("Canvas framing failed: \(error)")
                 }
             case let .reconnect(reason): disconnected(); reconnect(reason)
-            case let .rejected(status):
-                rejected(status)
-                if status == 7 {
-                    cancelRetry?()
-                    cancelRetry = schedule(1) { [weak self] in
-                        guard let self else { return }
-                        self.cancelRetry = nil
-                        self.run(self.session.retryNotReady())
-                    }
-                }
+            case let .rejected(status): rejected(status)
             }
         }
     }
