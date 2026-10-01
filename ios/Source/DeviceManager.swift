@@ -1524,7 +1524,7 @@ struct ViewState {
     }
 
     func sendWifiCredentials(_ ssid: String, _ password: String) {
-        Bridge.log("MAN: Sending wifi credentials: \(ssid)")
+        Bridge.log("MAN: Sending wifi credentials: \(ssid) \(password)")
         sgc?.sendWifiCredentials(ssid, password)
     }
 
