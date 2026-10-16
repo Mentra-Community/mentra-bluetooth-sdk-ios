@@ -174,10 +174,6 @@ public struct SettingsAckEvent: CustomStringConvertible {
         stringValue(values, "requestId") ?? ""
     }
 
-    public var gesture: TouchGesture? {
-        stringValue(values, "gesture").flatMap(TouchGesture.init(rawValue:))
-    }
-
     public var setting: String {
         stringValue(values, "setting") ?? ""
     }

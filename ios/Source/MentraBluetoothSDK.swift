@@ -704,17 +704,6 @@ public final class MentraBluetoothSDK {
         )
     }
 
-    /// Disable a stock action while retaining touch events. Reset by BES on BLE disconnect.
-    public func setTouchGestureDefaultBehaviorEnabled(_ gesture: TouchGesture, enabled: Bool) async throws -> SettingsAckEvent {
-        try await performSettingsCommand(
-            setting: "touch_gesture_default",
-            updateStore: { _ in },
-            send: { requestId in
-                try DeviceManager.shared.sendTouchGestureDefaultBehaviorEnabled(requestId: requestId, gesture: gesture, enabled: enabled)
-            }
-        )
-    }
-
     public func setGalleryModeEnabled(_ enabled: Bool) async throws -> SettingsAckEvent {
         try await performSettingsCommand(
             setting: "gallery_mode",
@@ -1185,12 +1174,8 @@ public final class MentraBluetoothSDK {
     /// Fire-and-forget Mentra Live Wi-Fi ADB toggle. Glasses do not ack this
     /// command, so there is no pending-response wait (unlike hotspot / Wi-Fi forget).
     public func setWifiAdbState(enabled: Bool) async throws {
-        try await setWifiAdbState(enabled: enabled, expectedBluetoothMac: nil)
-    }
-
-    public func setWifiAdbState(enabled: Bool, expectedBluetoothMac: String?) async throws {
         try requireGlassesConnected(operation: "toggle Wi-Fi ADB")
-        try DeviceManager.shared.setWifiAdbState(enabled, expectedBluetoothMac: expectedBluetoothMac)
+        DeviceManager.shared.setWifiAdbState(enabled)
     }
 
     func setSystemTime(timestampMs: Int64) {
