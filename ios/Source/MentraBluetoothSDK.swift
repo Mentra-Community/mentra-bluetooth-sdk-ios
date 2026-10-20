@@ -322,7 +322,6 @@ public final class MentraBluetoothSDK {
 
     public init(configuration: MentraBluetoothSDKConfiguration = .default) {
         self.configuration = configuration
-        NimoResourceFixture.shared.start()
         // Once per process: apps may create the SDK more than once.
         if !Self.didWarnMissingBackgroundMode, !Self.supportsBackgroundReconnect {
             Self.didWarnMissingBackgroundMode = true
@@ -464,10 +463,6 @@ public final class MentraBluetoothSDK {
     }
 
     public func startScan(model: DeviceModel) throws {
-        NimoResourceFixture.shared.start()
-        guard NimoResourceFixture.shared.allowsManager(model.deviceType) else {
-            throw BluetoothSdkError(code: "nimo_capture_required", message: "The original NIMO fixture capture must be armed before scanning.")
-        }
         if model != .simulated {
             try BluetoothAvailability.shared.requirePoweredOn(operation: "scan for glasses")
         }
@@ -538,10 +533,6 @@ public final class MentraBluetoothSDK {
     }
 
     public func connect(to device: Device, options: ConnectOptions = ConnectOptions()) throws {
-        NimoResourceFixture.shared.start()
-        guard NimoResourceFixture.shared.allowsManager(device.model.deviceType, name: device.name) else {
-            throw BluetoothSdkError(code: "nimo_capture_required", message: "The original NIMO fixture capture must be armed before connection.")
-        }
         clearBluetoothRestoreIntent()
         if device.model != .simulated {
             try BluetoothAvailability.shared.requirePoweredOn(operation: "connect to glasses")
@@ -553,7 +544,7 @@ public final class MentraBluetoothSDK {
         if options.cancelExistingConnectionAttempt {
             if isController {
                 DeviceManager.shared.disconnectController()
-            } else if !NimoResourceFixture.shared.preserveScan(device.name) {
+            } else {
                 cancelConnectionAttempt()
             }
         }
@@ -581,14 +572,10 @@ public final class MentraBluetoothSDK {
                 message: "Set a default glasses device before calling connectDefault."
             )
         }
-        NimoResourceFixture.shared.start()
-        guard NimoResourceFixture.shared.allowsManager(device.model.deviceType, name: device.name) else {
-            throw BluetoothSdkError(code: "nimo_capture_required", message: "The original NIMO fixture capture must be armed before connection.")
-        }
         if device.model != .simulated {
             try BluetoothAvailability.shared.requirePoweredOn(operation: "connect to glasses")
         }
-        if options.cancelExistingConnectionAttempt && !NimoResourceFixture.shared.preserveScan(device.name) {
+        if options.cancelExistingConnectionAttempt {
             cancelConnectionAttempt()
         }
         DeviceManager.shared.connectDefault(requiresAncs: options.requiresAncs)
@@ -1198,12 +1185,8 @@ public final class MentraBluetoothSDK {
     /// Fire-and-forget Mentra Live Wi-Fi ADB toggle. Glasses do not ack this
     /// command, so there is no pending-response wait (unlike hotspot / Wi-Fi forget).
     public func setWifiAdbState(enabled: Bool) async throws {
-        try await setWifiAdbState(enabled: enabled, expectedBluetoothMac: nil)
-    }
-
-    public func setWifiAdbState(enabled: Bool, expectedBluetoothMac: String?) async throws {
         try requireGlassesConnected(operation: "toggle Wi-Fi ADB")
-        try DeviceManager.shared.setWifiAdbState(enabled, expectedBluetoothMac: expectedBluetoothMac)
+        DeviceManager.shared.setWifiAdbState(enabled)
     }
 
     func setSystemTime(timestampMs: Int64) {

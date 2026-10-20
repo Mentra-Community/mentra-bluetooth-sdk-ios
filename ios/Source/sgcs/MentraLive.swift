@@ -1152,14 +1152,13 @@ extension MentraLive: CBPeripheralDelegate {
     }
 
     nonisolated func peripheral(
-        _ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?
+        _: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?
     ) {
-        guard let token = notificationIngress.capture(peripheral) else { return }
         let uuid = characteristic.uuid
         let data = characteristic.value
         let errorDescription = error?.localizedDescription
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.connectedPeripheral === peripheral, self.notificationIngress.current(token) else { return }
+            guard let self else { return }
             // Bridge.log("LIVE: DEBUG: didUpdateValueFor CALLED - characteristic: \(uuid), dataSize: \(data?.count ?? 0)")
             // Log raw hex for debugging glasses_ready issue
             if let data {
@@ -1196,7 +1195,7 @@ extension MentraLive: CBPeripheralDelegate {
             }
 
             // Handle regular data (JSON messages, file transfers, etc.)
-            self.receiveBleNotification(data, token: token)
+            self.processReceivedData(data)
         }
     }
 
@@ -1279,29 +1278,6 @@ typealias JSONObject = [String: Any]
 
 // MARK: - Main Manager Class
 
-/// Captures CoreBluetooth callback provenance before its MainActor hop.
-final class MentraLiveNotificationIngress: @unchecked Sendable {
-    struct Token: Equatable, Sendable { let source: ObjectIdentifier; let epoch: UInt64 }
-    private let lock = NSLock()
-    private var epoch: UInt64 = 0
-    private var source: ObjectIdentifier?
-    func begin(_ peer: AnyObject?) -> Token? {
-        lock.lock(); defer { lock.unlock() }
-        epoch &+= 1
-        source = peer.map(ObjectIdentifier.init)
-        return source.map { Token(source: $0, epoch: epoch) }
-    }
-    func capture(_ peer: AnyObject) -> Token? {
-        lock.lock(); defer { lock.unlock() }
-        guard source == ObjectIdentifier(peer) else { return nil }
-        return Token(source: ObjectIdentifier(peer), epoch: epoch)
-    }
-    func current(_ token: Token) -> Bool {
-        lock.lock(); defer { lock.unlock() }
-        return source == token.source && epoch == token.epoch
-    }
-}
-
 @MainActor
 class MentraLive: NSObject, SGCManager {
     // Feature Flags
@@ -1345,25 +1321,11 @@ class MentraLive: NSObject, SGCManager {
         pairingAdvertisement(advertisementData) != nil
     }
 
-    private nonisolated let notificationIngress = MentraLiveNotificationIngress()
-    private var receivingNotification: MentraLiveNotificationIngress.Token?
-    private var wifiAdbPeerIdentity: (mac: String, token: MentraLiveNotificationIngress.Token)?
-    private final class WifiAdbAdmission {
-        let identity: (mac: String, token: MentraLiveNotificationIngress.Token)
-        let wireEpoch: Int
-        var queued = 0
-        var refused = false
-        init(identity: (mac: String, token: MentraLiveNotificationIngress.Token), wireEpoch: Int) {
-            self.identity = identity; self.wireEpoch = wireEpoch
-        }
-    }
-    private var wifiAdbAdmission: WifiAdbAdmission?
     var connectionState: String = ConnTypes.DISCONNECTED
 
     /// Mirrors Android `updateConnectionState` — RN home reads `glasses.connectionState` for reconnecting UI.
     private func updateConnectionState(_ state: String) {
         if state == ConnTypes.DISCONNECTED {
-            endBleNotificationSession()
             // Device identity is session-bound. Clear it on disconnect so a previous pair's
             // identifiers cannot be associated with the next connection. Connect must NOT clear
             // them: DeviceManager.disconnect already wipes them before any new connection, and
@@ -1383,6 +1345,7 @@ class MentraLive: NSObject, SGCManager {
         if state == ConnTypes.DISCONNECTED {
             resetPendingAckState(reason: "BLE session ended")
             resetWireNegotiationState()
+            resetReadinessExchange()
             resetAncsRelayState()
             // Queued writes are session-bound: transmitting them into the NEXT session
             // (e.g. a stale handshake whose reply activates v2 before the new session
@@ -1568,9 +1531,7 @@ class MentraLive: NSObject, SGCManager {
     /// BLE Properties
     private var centralManager: CBCentralManager?
 
-    private var connectedPeripheral: CBPeripheral? {
-        didSet { _ = beginBleNotificationSession(source: connectedPeripheral) }
-    }
+    private var connectedPeripheral: CBPeripheral?
     /// Peripheral for the in-flight connect; used to ignore stale disconnect/fail callbacks.
     private var connectingPeripheral: CBPeripheral?
     private var txCharacteristic: CBCharacteristic?
@@ -1643,6 +1604,13 @@ class MentraLive: NSObject, SGCManager {
     // the physical connection — so a first-seen sid after an upgrade OTA cannot be
     // mistaken for a fresh pairing just because a not-ready heartbeat slipped in first.
     private var readinessCompletedThisBleSession = false
+    /// Readiness exchange the phone is waiting on. Every phone_ready carries it until the
+    /// matching glasses_ready arrives, so retries and the copies the BES buffers while the
+    /// glasses boot are one exchange: the glasses reset their transport once for it and answer
+    /// later copies without resetting. Both exchange fields are scoped to the BLE session.
+    private var pendingReadyId: String?
+    /// `sid` of the glasses process whose glasses_ready this BLE session last handled.
+    private var readyGlassesSessionId: String?
     private var globalMessageId = 0
     private var lastReceivedMessageId = 0
     private var bleWriteTraceSequence = 0
@@ -2233,32 +2201,44 @@ class MentraLive: NSObject, SGCManager {
             return commands.removeFirst()
         }
 
-        var count: Int { commands.count }
+        /// Discards the run of writes from earlier wire-session generations at the head of
+        /// the queue in one pass and dequeues the first current one. Stale writes are never
+        /// sent, so they must not each cost a drain tick: a burst of epoch resets would
+        /// otherwise park every current write behind seconds of dead entries.
+        func dequeue(currentGeneration: Int) -> (command: PendingMessage?, staleIds: [String]) {
+            let firstCurrent = commands.firstIndex { $0.generation == currentGeneration } ?? commands.endIndex
+            let staleIds = commands[..<firstCurrent].map(\.id)
+            commands.removeSubrange(..<firstCurrent)
+            return (commands.isEmpty ? nil : commands.removeFirst(), staleIds)
+        }
+
         func removeAll() {
             commands.removeAll()
         }
     }
-
-    var pendingBleCommandCount: Int { commandQueue.count }
 
     private func setupCommandQueue() {
         Task.detached { [weak self] in
             guard let self else { return }
             while true {
                 let pendingIsNil = await MainActor.run { self.pending == nil }
-                if pendingIsNil {
-                    if let command = await self.commandQueue.dequeue() {
-                        let currentGeneration = await MainActor.run { self.wireSessionGeneration }
-                        if command.generation != currentGeneration {
-                            Bridge.log("LIVE: Dropping stale queued write from a previous session epoch (id: \(command.id))")
-                        } else {
-                            await self.processSendQueue(command)
-                        }
-                    }
+                if pendingIsNil, let command = await self.dequeueCurrentGenerationWrite() {
+                    await self.processSendQueue(command)
                 }
                 try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
             }
         }
+    }
+
+    private func dequeueCurrentGenerationWrite() -> PendingMessage? {
+        let next = commandQueue.dequeue(currentGeneration: wireSessionGeneration)
+        if !next.staleIds.isEmpty {
+            Bridge.log(
+                "LIVE: Dropping \(next.staleIds.count) stale queued write(s) from a previous session epoch " +
+                    "(ids: \(next.staleIds.joined(separator: ", ")))"
+            )
+        }
+        return next.command
     }
 
     private func processSendQueue(_ message: PendingMessage) async {
@@ -2654,7 +2634,6 @@ class MentraLive: NSObject, SGCManager {
     private func attachL2capFileChannel(_ channel: CBL2CAPChannel) {
         closeL2capFileChannel()
 
-        guard let peer = connectedPeripheral, let token = notificationIngress.capture(peer) else { return }
         let channelId = UUID()
         l2capFileChannelId = channelId
         let reader = MentraLiveL2capChannel(
@@ -2664,7 +2643,7 @@ class MentraLive: NSObject, SGCManager {
                 // while the existing transfer state remains serialized on the main actor.
                 DispatchQueue.main.async {
                     guard let self, self.l2capFileChannelId == channelId else { return }
-                    self.receiveBleNotification(frame, token: token)
+                    self.processReceivedData(frame)
                 }
             },
             onClose: { [weak self] in
@@ -2846,6 +2825,16 @@ class MentraLive: NSObject, SGCManager {
                 Bridge.log("LIVE: Ignoring stale glasses_ready during pairing yield")
                 return
             }
+            let sid = (json["sid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let readyId = (json["readyId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            if let readyId, isRepeatedGlassesReady(readyId: readyId, sid: sid) {
+                Bridge.log("LIVE: Ignoring repeated glasses_ready for readiness exchange \(readyId) - the glasses did not reset for it")
+                return
+            }
+            if readyId != nil, readyId == pendingReadyId {
+                pendingReadyId = nil
+            }
+            readyGlassesSessionId = sid
             // glasses_ready is a REMOTE wire-session reset: the glasses ran
             // onTransportReset() before sending it, so their side is back on legacy
             // framing regardless of what this side negotiated earlier. Start a fresh
@@ -2861,7 +2850,7 @@ class MentraLive: NSObject, SGCManager {
             // Record the session id BEFORE marking ready: an unsolicited glasses_ready
             // already runs this full remote-reset flow, so recording (not re-triggering)
             // is correct here; version_info detection covers the restart case.
-            glassesSessionId = (json["sid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            glassesSessionId = sid
             streamControlVersion = json["streamControlVersion"] as? Int ?? 0
             Bridge.sendTypedMessage(
                 "wifi_protocol_session_ready",
@@ -3248,7 +3237,6 @@ class MentraLive: NSObject, SGCManager {
                     )
                 }
                 if let bluetoothMacAddress = nonEmptyStringValue(fields, "bt_mac_address") {
-                    recordWifiAdbPeerIdentity(bluetoothMacAddress)
                     DeviceStore.shared.apply("glasses", "bluetoothMacAddress", bluetoothMacAddress)
                 }
                 if let wifiMacAddress = nonEmptyStringValue(fields, "wifi_mac_address") {
@@ -3433,12 +3421,7 @@ class MentraLive: NSObject, SGCManager {
                     // This prevents re-initialization on every heartbeat after initial connection
                     // The ready flag is reset on disconnect/reconnect, so this won't prevent proper reconnection
                     if !fullyBooted {
-                        let readyMsg: [String: Any] = [
-                            "type": "phone_ready",
-                            "timestamp": Int64(Date().timeIntervalSince1970 * 1000),
-                        ]
-                        // Send it through our data channel
-                        sendJson(readyMsg, wakeUp: true)
+                        sendPhoneReady(reason: "SOC ready")
                     }
                 }
             }
@@ -3735,66 +3718,6 @@ class MentraLive: NSObject, SGCManager {
         sendJson(json, wakeUp: true)
     }
 
-    @discardableResult func beginBleNotificationSession(source: AnyObject?) -> MentraLiveNotificationIngress.Token? {
-        wifiAdbPeerIdentity = nil
-        incomingChunkReassembler.clear()
-        resetWireNegotiationState()
-        commandQueue.removeAll()
-        return notificationIngress.begin(source)
-    }
-
-    func endBleNotificationSession() {
-        wifiAdbPeerIdentity = nil
-        incomingChunkReassembler.clear()
-        resetWireNegotiationState()
-        commandQueue.removeAll()
-        _ = notificationIngress.begin(nil)
-    }
-
-    func receiveBleNotification(_ data: Data, token: MentraLiveNotificationIngress.Token) {
-        guard notificationIngress.current(token) else { return }
-        let previous = receivingNotification
-        receivingNotification = token
-        defer { receivingNotification = previous }
-        processReceivedData(data)
-    }
-
-    private func recordWifiAdbPeerIdentity(_ mac: String) {
-        guard let token = receivingNotification, notificationIngress.current(token) else { return }
-        wifiAdbPeerIdentity = (mac, token)
-    }
-
-    private func currentWifiAdbAdmission(_ admission: WifiAdbAdmission) -> Bool {
-        notificationIngress.current(admission.identity.token) && wireSessionGeneration == admission.wireEpoch &&
-            wifiAdbPeerIdentity?.mac == admission.identity.mac && wifiAdbLinkReady
-    }
-
-    var wifiAdbLinkReady: Bool {
-        connectionState == ConnTypes.CONNECTED && connectedPeripheral?.state == .connected && txCharacteristic != nil
-    }
-
-    func enqueueWifiAdbState(_ enabled: Bool) -> Bool {
-        // Match Wi-Fi forget: public log delegates must not reenter between validation and enqueue.
-        sendJson(["type": "set_wifi_adb_state", "enabled": enabled], wakeUp: true, requireAck: true, bridgeLogging: false)
-    }
-
-    /// MainActor performs identity validation and queue insertion without suspension.
-    func sendWifiAdbState(_ enabled: Bool, expectedBluetoothMac: String) throws {
-        guard expectedBluetoothMac.range(of: "^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$", options: .regularExpression) != nil,
-              let identity = wifiAdbPeerIdentity,
-              identity.mac.caseInsensitiveCompare(expectedBluetoothMac) == .orderedSame,
-              notificationIngress.current(identity.token), wifiAdbLinkReady else {
-            throw BluetoothSdkError(code: "device_identity_changed", message: "The selected glasses identity or connection changed.")
-        }
-        let admission = WifiAdbAdmission(identity: identity, wireEpoch: wireSessionGeneration)
-        wifiAdbAdmission = admission
-        defer { wifiAdbAdmission = nil }
-        guard enqueueWifiAdbState(enabled), !admission.refused, admission.queued > 0,
-              currentWifiAdbAdmission(admission) else {
-            throw BluetoothSdkError(code: "command_send_failed", message: "Could not queue Wi-Fi debugging for the selected glasses.")
-        }
-    }
-
     func sendWifiAdbState(_ enabled: Bool) {
         Bridge.log("LIVE: 🔧 Sending Wi-Fi ADB state: \(enabled)")
 
@@ -4049,6 +3972,20 @@ class MentraLive: NSObject, SGCManager {
 
     // MARK: - Message Handlers
 
+    /// A glasses_ready that echoes a readyId answers a phone_ready exchange. The answer to the
+    /// exchange the phone is waiting on, and any answer from a glasses process other than the
+    /// one this link last handled (an asg restart resets for every exchange it first sees),
+    /// followed a transport reset. Any other answer repeats an exchange that process already
+    /// reset for, or one superseded by the pending exchange, whose answer is still to come.
+    private func isRepeatedGlassesReady(readyId: String, sid: String?) -> Bool {
+        readyId != pendingReadyId && sid == readyGlassesSessionId
+    }
+
+    private func resetReadinessExchange() {
+        pendingReadyId = nil
+        readyGlassesSessionId = nil
+    }
+
     private func handleGlassesReady() {
         Bridge.log("LIVE: 🎉 Received glasses_ready message - SOC is booted and ready!")
 
@@ -4148,7 +4085,6 @@ class MentraLive: NSObject, SGCManager {
         DeviceStore.shared.apply("glasses", "otaVersionUrl", otaVersionUrl)
         DeviceStore.shared.apply("glasses", "firmwareVersion", firmwareVersion)
         if let bluetoothMacAddress {
-            recordWifiAdbPeerIdentity(bluetoothMacAddress)
             DeviceStore.shared.apply("glasses", "bluetoothMacAddress", bluetoothMacAddress)
         }
         if let serialNumber {
@@ -4831,10 +4767,6 @@ class MentraLive: NSObject, SGCManager {
     }
 
     func queueSend(_ data: Data, id: String, trace: BleWriteTrace?) {
-        if let admission = wifiAdbAdmission {
-            guard currentWifiAdbAdmission(admission) else { admission.refused = true; return }
-            admission.queued += 1
-        }
         let significantQueueSize = SIGNIFICANT_BLE_TRACE_QUEUE_SIZE
         // Insert synchronously on MainActor so fragments and dependent commands retain call order.
         let generation = wireSessionGeneration
@@ -4939,8 +4871,7 @@ class MentraLive: NSObject, SGCManager {
             }
         }
 
-        BleTraceLogger.logMap(direction: "phone_to_glasses", layer: layer, type: trace.commandType, payload: payload,
-                              forwardToBridge: wifiAdbAdmission == nil)
+        BleTraceLogger.logMap(direction: "phone_to_glasses", layer: layer, type: trace.commandType, payload: payload)
     }
 
     private func bleTraceWarningReason(stage: String, extra: [String: Any?]) -> String? {
@@ -5270,8 +5201,7 @@ class MentraLive: NSObject, SGCManager {
                     direction: "phone_to_glasses",
                     layer: "sdk_ble_command",
                     payload: json,
-                    bytes: jsonData.count,
-                    forwardToBridge: bridgeLogging
+                    bytes: jsonData.count
                 )
 
                 if useBinaryWireProtocol, isNewVersion {
@@ -5908,12 +5838,13 @@ class MentraLive: NSObject, SGCManager {
             )
             // requestReadyK900()
 
-            let readyMsg: [String: Any] = [
-                "type": "phone_ready",
-                "timestamp": Int64(Date().timeIntervalSince1970 * 1000),
-            ]
-            // Send it through our data channel
-            sendJson(readyMsg, wakeUp: true)
+            // The timer fires on bluetoothQueue; the pending readiness exchange is main-actor state.
+            // A tick queued just before glasses_ready stopped the loop must not start a new exchange.
+            let check = self.readinessCheckCounter
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.readinessCheckDispatchTimer != nil else { return }
+                self.sendPhoneReady(reason: "readiness check #\(check)")
+            }
         }
 
         readinessCheckDispatchTimer!.resume()
@@ -6159,6 +6090,7 @@ class MentraLive: NSObject, SGCManager {
         // Stop all timers
         stopAllTimers()
         resetWireNegotiationState()
+        resetReadinessExchange()
         commandQueue.removeAll() // stale writes die with the session
         closeL2capFileChannel()
 
@@ -6288,10 +6220,15 @@ extension MentraLive {
 
     /// Sends phone_ready to (re)start the glasses-driven readiness flow.
     private func sendPhoneReady(reason: String) {
-        Bridge.log("LIVE: 📱 Sending phone_ready to glasses (\(reason)) - waiting for glasses_ready response")
+        let readyId = pendingReadyId ?? UUID().uuidString
+        pendingReadyId = readyId
+        Bridge.log(
+            "LIVE: 📱 Sending phone_ready to glasses (\(reason), exchange \(readyId)) - waiting for glasses_ready response"
+        )
         let readyMsg: [String: Any] = [
             "type": "phone_ready",
             "timestamp": Int64(Date().timeIntervalSince1970 * 1000),
+            "readyId": readyId,
         ]
         sendJson(readyMsg, wakeUp: true)
     }
