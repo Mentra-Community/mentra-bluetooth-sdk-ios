@@ -1345,6 +1345,7 @@ class MentraLive: NSObject, SGCManager {
         if state == ConnTypes.DISCONNECTED {
             resetPendingAckState(reason: "BLE session ended")
             resetWireNegotiationState()
+            resetReadinessExchange()
             resetAncsRelayState()
             // Queued writes are session-bound: transmitting them into the NEXT session
             // (e.g. a stale handshake whose reply activates v2 before the new session
@@ -1603,6 +1604,13 @@ class MentraLive: NSObject, SGCManager {
     // the physical connection — so a first-seen sid after an upgrade OTA cannot be
     // mistaken for a fresh pairing just because a not-ready heartbeat slipped in first.
     private var readinessCompletedThisBleSession = false
+    /// Readiness exchange the phone is waiting on. Every phone_ready carries it until the
+    /// matching glasses_ready arrives, so retries and the copies the BES buffers while the
+    /// glasses boot are one exchange: the glasses reset their transport once for it and answer
+    /// later copies without resetting. Both exchange fields are scoped to the BLE session.
+    private var pendingReadyId: String?
+    /// `sid` of the glasses process whose glasses_ready this BLE session last handled.
+    private var readyGlassesSessionId: String?
     private var globalMessageId = 0
     private var lastReceivedMessageId = 0
     private var bleWriteTraceSequence = 0
@@ -2193,6 +2201,17 @@ class MentraLive: NSObject, SGCManager {
             return commands.removeFirst()
         }
 
+        /// Discards the run of writes from earlier wire-session generations at the head of
+        /// the queue in one pass and dequeues the first current one. Stale writes are never
+        /// sent, so they must not each cost a drain tick: a burst of epoch resets would
+        /// otherwise park every current write behind seconds of dead entries.
+        func dequeue(currentGeneration: Int) -> (command: PendingMessage?, staleIds: [String]) {
+            let firstCurrent = commands.firstIndex { $0.generation == currentGeneration } ?? commands.endIndex
+            let staleIds = commands[..<firstCurrent].map(\.id)
+            commands.removeSubrange(..<firstCurrent)
+            return (commands.isEmpty ? nil : commands.removeFirst(), staleIds)
+        }
+
         func removeAll() {
             commands.removeAll()
         }
@@ -2203,19 +2222,23 @@ class MentraLive: NSObject, SGCManager {
             guard let self else { return }
             while true {
                 let pendingIsNil = await MainActor.run { self.pending == nil }
-                if pendingIsNil {
-                    if let command = await self.commandQueue.dequeue() {
-                        let currentGeneration = await MainActor.run { self.wireSessionGeneration }
-                        if command.generation != currentGeneration {
-                            Bridge.log("LIVE: Dropping stale queued write from a previous session epoch (id: \(command.id))")
-                        } else {
-                            await self.processSendQueue(command)
-                        }
-                    }
+                if pendingIsNil, let command = await self.dequeueCurrentGenerationWrite() {
+                    await self.processSendQueue(command)
                 }
                 try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
             }
         }
+    }
+
+    private func dequeueCurrentGenerationWrite() -> PendingMessage? {
+        let next = commandQueue.dequeue(currentGeneration: wireSessionGeneration)
+        if !next.staleIds.isEmpty {
+            Bridge.log(
+                "LIVE: Dropping \(next.staleIds.count) stale queued write(s) from a previous session epoch " +
+                    "(ids: \(next.staleIds.joined(separator: ", ")))"
+            )
+        }
+        return next.command
     }
 
     private func processSendQueue(_ message: PendingMessage) async {
@@ -2802,6 +2825,16 @@ class MentraLive: NSObject, SGCManager {
                 Bridge.log("LIVE: Ignoring stale glasses_ready during pairing yield")
                 return
             }
+            let sid = (json["sid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let readyId = (json["readyId"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            if let readyId, isRepeatedGlassesReady(readyId: readyId, sid: sid) {
+                Bridge.log("LIVE: Ignoring repeated glasses_ready for readiness exchange \(readyId) - the glasses did not reset for it")
+                return
+            }
+            if readyId != nil, readyId == pendingReadyId {
+                pendingReadyId = nil
+            }
+            readyGlassesSessionId = sid
             // glasses_ready is a REMOTE wire-session reset: the glasses ran
             // onTransportReset() before sending it, so their side is back on legacy
             // framing regardless of what this side negotiated earlier. Start a fresh
@@ -2817,7 +2850,7 @@ class MentraLive: NSObject, SGCManager {
             // Record the session id BEFORE marking ready: an unsolicited glasses_ready
             // already runs this full remote-reset flow, so recording (not re-triggering)
             // is correct here; version_info detection covers the restart case.
-            glassesSessionId = (json["sid"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            glassesSessionId = sid
             streamControlVersion = json["streamControlVersion"] as? Int ?? 0
             Bridge.sendTypedMessage(
                 "wifi_protocol_session_ready",
@@ -3388,12 +3421,7 @@ class MentraLive: NSObject, SGCManager {
                     // This prevents re-initialization on every heartbeat after initial connection
                     // The ready flag is reset on disconnect/reconnect, so this won't prevent proper reconnection
                     if !fullyBooted {
-                        let readyMsg: [String: Any] = [
-                            "type": "phone_ready",
-                            "timestamp": Int64(Date().timeIntervalSince1970 * 1000),
-                        ]
-                        // Send it through our data channel
-                        sendJson(readyMsg, wakeUp: true)
+                        sendPhoneReady(reason: "SOC ready")
                     }
                 }
             }
@@ -3943,6 +3971,20 @@ class MentraLive: NSObject, SGCManager {
     }
 
     // MARK: - Message Handlers
+
+    /// A glasses_ready that echoes a readyId answers a phone_ready exchange. The answer to the
+    /// exchange the phone is waiting on, and any answer from a glasses process other than the
+    /// one this link last handled (an asg restart resets for every exchange it first sees),
+    /// followed a transport reset. Any other answer repeats an exchange that process already
+    /// reset for, or one superseded by the pending exchange, whose answer is still to come.
+    private func isRepeatedGlassesReady(readyId: String, sid: String?) -> Bool {
+        readyId != pendingReadyId && sid == readyGlassesSessionId
+    }
+
+    private func resetReadinessExchange() {
+        pendingReadyId = nil
+        readyGlassesSessionId = nil
+    }
 
     private func handleGlassesReady() {
         Bridge.log("LIVE: 🎉 Received glasses_ready message - SOC is booted and ready!")
@@ -5796,12 +5838,13 @@ class MentraLive: NSObject, SGCManager {
             )
             // requestReadyK900()
 
-            let readyMsg: [String: Any] = [
-                "type": "phone_ready",
-                "timestamp": Int64(Date().timeIntervalSince1970 * 1000),
-            ]
-            // Send it through our data channel
-            sendJson(readyMsg, wakeUp: true)
+            // The timer fires on bluetoothQueue; the pending readiness exchange is main-actor state.
+            // A tick queued just before glasses_ready stopped the loop must not start a new exchange.
+            let check = self.readinessCheckCounter
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.readinessCheckDispatchTimer != nil else { return }
+                self.sendPhoneReady(reason: "readiness check #\(check)")
+            }
         }
 
         readinessCheckDispatchTimer!.resume()
@@ -6047,6 +6090,7 @@ class MentraLive: NSObject, SGCManager {
         // Stop all timers
         stopAllTimers()
         resetWireNegotiationState()
+        resetReadinessExchange()
         commandQueue.removeAll() // stale writes die with the session
         closeL2capFileChannel()
 
@@ -6176,10 +6220,15 @@ extension MentraLive {
 
     /// Sends phone_ready to (re)start the glasses-driven readiness flow.
     private func sendPhoneReady(reason: String) {
-        Bridge.log("LIVE: 📱 Sending phone_ready to glasses (\(reason)) - waiting for glasses_ready response")
+        let readyId = pendingReadyId ?? UUID().uuidString
+        pendingReadyId = readyId
+        Bridge.log(
+            "LIVE: 📱 Sending phone_ready to glasses (\(reason), exchange \(readyId)) - waiting for glasses_ready response"
+        )
         let readyMsg: [String: Any] = [
             "type": "phone_ready",
             "timestamp": Int64(Date().timeIntervalSince1970 * 1000),
+            "readyId": readyId,
         ]
         sendJson(readyMsg, wakeUp: true)
     }
