@@ -14,9 +14,9 @@ enum BluetoothSdkDefaults {
     /// Must stay true. The firmware defaults auto power-off on, and we re-push
     /// every Bluetooth setting on connect, so a false default here would
     /// silently disable it on every pair the app touches.
-    static let autoPowerOffEnabled = false
+    static let autoPowerOffEnabled = true
     private static let infoSdkVersionKey = "MentraBluetoothSdkVersion"
-    private static let swiftPackageSdkVersion = "3.3.0-beta.1221"
+    private static let swiftPackageSdkVersion = "3.4.0-dev.1222"
     private static let swiftPackageSdkVersionPlaceholder = "__MENTRA" + "_BLUETOOTH_SDK_VERSION__"
 
     private static func normalizedSdkVersion(_ value: String?) -> String? {
