@@ -16,7 +16,7 @@ enum BluetoothSdkDefaults {
     /// silently disable it on every pair the app touches.
     static let autoPowerOffEnabled = true
     private static let infoSdkVersionKey = "MentraBluetoothSdkVersion"
-    private static let swiftPackageSdkVersion = "3.5.0-dev.1262"
+    private static let swiftPackageSdkVersion = "3.5.0-dev.1263"
     private static let swiftPackageSdkVersionPlaceholder = "__MENTRA" + "_BLUETOOTH_SDK_VERSION__"
 
     private static func normalizedSdkVersion(_ value: String?) -> String? {
