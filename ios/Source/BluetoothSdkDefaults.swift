@@ -16,7 +16,7 @@ enum BluetoothSdkDefaults {
     /// 20-minute unworn power-off on every pair the app touches.
     static let autoPowerOffEnabled = false
     private static let infoSdkVersionKey = "MentraBluetoothSdkVersion"
-    private static let swiftPackageSdkVersion = "3.5.0-dev.1329"
+    private static let swiftPackageSdkVersion = "3.4.0-beta.1330"
     private static let swiftPackageSdkVersionPlaceholder = "__MENTRA" + "_BLUETOOTH_SDK_VERSION__"
 
     private static func normalizedSdkVersion(_ value: String?) -> String? {
