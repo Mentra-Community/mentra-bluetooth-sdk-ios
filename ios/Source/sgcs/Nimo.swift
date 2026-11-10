@@ -19,9 +19,6 @@ enum NimoBLE {
     static let CHAR_TX = CBUUID(string: "00002021-0000-1000-8000-00805F9B34FB")
     static let CHAR_RX = CBUUID(string: "00002022-0000-1000-8000-00805F9B34FB")
     static let CHAR_MIC = CBUUID(string: "00002025-0000-1000-8000-00805F9B34FB")
-    /// Firmware update channel on the same service (see NimoOtaProtocol).
-    static let CHAR_OTA_TX = CBUUID(string: "00002001-0000-1000-8000-00805F9B34FB")
-    static let CHAR_OTA_RX = CBUUID(string: "00002002-0000-1000-8000-00805F9B34FB")
 
     static let CHUNK_SIZE = 501
     static let INTER_FRAME_DELAY_MS = 5
@@ -586,18 +583,7 @@ class Nimo: NSObject, SGCManager {
         static let batteryPollSeconds: TimeInterval = 30
         /// Fall back to the other ear if the preferred one goes quiet for this long.
         static let micSideFallbackSeconds: TimeInterval = 2
-        /// Version replies normally arrive within a few hundred ms of the handshake.
-        static let versionWaitSeconds: TimeInterval = 3
-        /// Let the wearer read the update notice before the display goes away.
-        static let updateNoticeSeconds: TimeInterval = 2
-        static let otaPrepareTimeoutSeconds: TimeInterval = 15
-        /// The glasses reboot after the update; force a reconnect if they never drop the link.
-        static let postUpdateReconnectSeconds: TimeInterval = 120
-        /// Per app process, so a failing update cannot loop forever.
-        static let maxUpdateAttempts = 3
     }
-
-    private static var updateAttempts = 0
 
     // BLE
     private var centralManager: CBCentralManager?
@@ -605,8 +591,6 @@ class Nimo: NSObject, SGCManager {
     private var txChar: CBCharacteristic?
     private var rxChar: CBCharacteristic?
     private var micChar: CBCharacteristic?
-    private var otaTxChar: CBCharacteristic?
-    private var otaRxChar: CBCharacteristic?
     private var isDisconnecting = false
     private var scanRequested = false
     private lazy var discovery = NimoDiscovery<CBPeripheral>(
@@ -707,17 +691,6 @@ class Nimo: NSObject, SGCManager {
     // Version info
     private var firmwareVersionPacked = ""
     private var firmwareVersionDetail = ""
-    private var versionPackedReceived = false
-    private var versionDetailReceived = false
-
-    /// Firmware gate: the canvas only runs on the supported firmware; anything else is updated first.
-    private enum FirmwareState { case unknown, current, updating }
-    private var firmwareState = FirmwareState.unknown
-    private var firmwareUpdater: NimoFirmwareUpdater?
-    private var cancelFirmwareTimer: (() -> Void)?
-    private var otaNotifyPending: (() -> Void)?
-    private var pendingOtaWrite: (Data, (Bool) -> Void)?
-    private var updating: Bool { firmwareState == .updating }
 
     // Mic audio
     private var opusDecoder: NimoOpusDecoder?
@@ -767,8 +740,6 @@ class Nimo: NSObject, SGCManager {
         txChar = nil
         rxChar = nil
         micChar = nil
-        otaTxChar = nil
-        otaRxChar = nil
         resetSessionState()
 
         DeviceStore.shared.apply("glasses", "connected", false)
@@ -833,10 +804,6 @@ class Nimo: NSObject, SGCManager {
         Bridge.log("NIMO: setMicEnabled(\(enabled))")
         guard let micChar else {
             Bridge.log("NIMO: mic characteristic not available")
-            return
-        }
-        if enabled, updating {
-            Bridge.log("NIMO: mic stays off during the firmware update")
             return
         }
         DeviceStore.shared.apply("glasses", "micEnabled", enabled)
@@ -1221,8 +1188,7 @@ class Nimo: NSObject, SGCManager {
     // MARK: - Write Queue
 
     private func enqueueWrite(_ characteristic: CBCharacteristic, _ bytes: Data) {
-        // The firmware update owns the link; ordinary commands wait for the next connection.
-        guard !updating, let peripheral else { return }
+        guard let peripheral else { return }
         writes.enqueue(peripheral, characteristic: characteristic, frames: [bytes])
     }
 
@@ -1234,7 +1200,7 @@ class Nimo: NSObject, SGCManager {
     private func enqueueFrames(_ frames: [Data], finalStarted: @escaping () -> Void,
                                completed: @escaping () -> Void) -> Bool
     {
-        guard !updating, let peripheral, let txChar else { return false }
+        guard let peripheral, let txChar else { return false }
         return writes.enqueue(peripheral, characteristic: txChar, frames: frames,
                               finalStarted: finalStarted, completed: completed)
     }
@@ -1359,145 +1325,10 @@ class Nimo: NSObject, SGCManager {
         DeviceStore.shared.apply("glasses", "fullyBooted", true)
         DeviceStore.shared.apply("glasses", "connectionState", ConnTypes.CONNECTED)
         startTimers()
-        // The canvas starts once the reported firmware is the supported one.
-        cancelFirmwareTimer = Self.scheduler(.main)(Const.versionWaitSeconds) { [weak self] in
-            self?.cancelFirmwareTimer = nil
-            self?.checkFirmware(waited: true)
-        }
-    }
-
-    // MARK: - Firmware check and update
-
-    /// Runs once per connection after the version replies (or `versionWaitSeconds`). The supported
-    /// firmware starts the canvas; anything else gets the bundled image, after a plain-text notice
-    /// that the stock firmware can show.
-    private func checkFirmware(waited: Bool = false) {
-        guard handshakeState == .ready, firmwareState == .unknown else { return }
-        guard waited || (versionPackedReceived && versionDetailReceived) else { return }
-        cancelFirmwareTimer?(); cancelFirmwareTimer = nil
-        if !versionPackedReceived ||
-            NimoFirmwareTarget.isCurrent(packedVersion: firmwareVersionPacked, detail: firmwareVersionDetail)
-        {
-            if !versionPackedReceived { Bridge.log("NIMO: no firmware version reply; starting normally") }
-            startCanvas()
-            return
-        }
-        Bridge.log("NIMO: firmware \(firmwareVersionPacked) '\(firmwareVersionDetail)' is not " +
-            "\(NimoFirmwareTarget.packedVersion)-\(NimoFirmwareTarget.buildTag)")
-        let firmware = Self.updateAttempts < Const.maxUpdateAttempts ? NimoFirmwareTarget.load() : nil
-        guard let firmware, let peripheral, let txChar, otaTxChar != nil, otaRxChar != nil else {
-            Bridge.log("NIMO: firmware update unavailable (attempts=\(Self.updateAttempts)); starting normally")
-            startCanvas()
-            return
-        }
-        Self.updateAttempts += 1
-        Bridge.log("NIMO: starting firmware update attempt \(Self.updateAttempts)")
-        showUpdateNotice(peripheral, txChar)
-        if let micChar { writes.enqueue(peripheral, characteristic: micChar, frames: [Data([0x52, 0x00, 0x00, 0x00])]) }
-        firmwareState = .updating
-        stopTimers()
-        opusDecoder = nil
-        DeviceStore.shared.apply("glasses", "micEnabled", false)
-        let schedule = Self.scheduler(.main)
-        // Prepare the channel after the notice frames drain and the wearer has had time to read it.
-        cancelFirmwareTimer = schedule(Const.updateNoticeSeconds) { [weak self] in
-            guard let self else { return }
-            self.cancelFirmwareTimer = schedule(Const.otaPrepareTimeoutSeconds) { [weak self] in
-                self?.cancelFirmwareTimer = nil
-                self?.abortTransport("NIMO firmware update channel did not become ready")
-            }
-            self.prepareUpdateChannel(peripheral, firmware)
-        }
-    }
-
-    private func startCanvas() {
-        firmwareState = .current
         // The Launch ACK validates peer readiness without waiting for the first
         // unsolicited heartbeat (which can arrive a minute after connection).
         canvas.activate()
         canvas.readiness(twsConnected && peerCompanionReady != false)
-    }
-
-    /// The pre-canvas text page (ASR note app); it renders on the stock firmware too.
-    private func showUpdateNotice(_ peripheral: CBPeripheral, _ txChar: CBCharacteristic) {
-        let enter = NimoFrameCodec.encodeFrame(
-            cmd: NimoProtocol.CMD_CONTROL_INSTRUCTION,
-            key: NimoProtocol.CTRL_ENTER_APP,
-            payload: Data([UInt8(NimoProtocol.APP_ID_ASR_NOTE), UInt8(NimoProtocol.APP_MODE_STANDALONE)])
-        )
-        let text = NimoFrameCodec.updateContentFrames(
-            appId: NimoProtocol.APP_ID_ASR_NOTE,
-            layoutId: 0,
-            resId: 0,
-            resType: NimoProtocol.WIDGET_TEXT_NEW,
-            content: Data(NimoFirmwareTarget.updatingText.utf8)
-        )
-        writes.enqueue(peripheral, characteristic: txChar, frames: [enter] + text)
-    }
-
-    /// Waits for queued writes to finish, then subscribes to the OTA replies.
-    private func prepareUpdateChannel(_ expected: CBPeripheral, _ firmware: Data) {
-        guard peripheral === expected, updating, let rx = otaRxChar else { return }
-        guard writes.queuedCount == 0, writes.activeCount == 0 else {
-            _ = Self.scheduler(.main)(0.02) { [weak self] in self?.prepareUpdateChannel(expected, firmware) }
-            return
-        }
-        if rx.isNotifying { startUpdater(expected, firmware); return }
-        otaNotifyPending = { [weak self] in self?.startUpdater(expected, firmware) }
-        expected.setNotifyValue(true, for: rx)
-    }
-
-    private func startUpdater(_ expected: CBPeripheral, _ firmware: Data) {
-        guard peripheral === expected, updating else { return }
-        cancelFirmwareTimer?(); cancelFirmwareTimer = nil
-        let withResponse = otaTxChar?.properties.contains(.writeWithoutResponse) != true
-        let capacity = min(512, expected.maximumWriteValueLength(for: withResponse ? .withResponse : .withoutResponse))
-        guard capacity > 20 else { abortTransport("NIMO firmware update needs a larger MTU"); return }
-        Bridge.log("NIMO: firmware transfer starting (\(firmware.count) bytes, write capacity \(capacity))")
-        let updater = NimoFirmwareUpdater(
-            firmware: firmware, writeCapacity: capacity, schedule: Self.scheduler(.main),
-            write: { [weak self] bytes, done in
-                guard let self, self.peripheral === expected, let tx = self.otaTxChar else { done(false); return }
-                if withResponse {
-                    if !self.writes.enqueue(expected, characteristic: tx, frames: [bytes], completed: { done(true) }) { done(false) }
-                } else {
-                    guard self.pendingOtaWrite == nil else { done(false); return }
-                    self.pendingOtaWrite = (bytes, done)
-                    self.drainOtaWrite()
-                }
-            },
-            progress: { Bridge.log("NIMO: firmware update \($0)%") },
-            finished: { [weak self] error in
-                guard let self, self.peripheral === expected else { return }
-                self.firmwareUpdater = nil
-                if let error {
-                    self.abortTransport("NIMO firmware update failed: \(error)")
-                    return
-                }
-                Bridge.log("NIMO: firmware update sent; glasses are rebooting")
-                self.cancelFirmwareTimer = Self.scheduler(.main)(Const.postUpdateReconnectSeconds) { [weak self] in
-                    guard let self else { return }
-                    self.cancelFirmwareTimer = nil
-                    if self.peripheral === expected { self.abortTransport("NIMO did not reboot after the firmware update") }
-                }
-            }
-        )
-        firmwareUpdater = updater
-        updater.start()
-    }
-
-    /// Write-without-response with CoreBluetooth backpressure; one packet in hand at a time.
-    private func drainOtaWrite() {
-        guard updating, let pending = pendingOtaWrite, let peripheral, let tx = otaTxChar,
-              peripheral.state == .connected, peripheral.canSendWriteWithoutResponse else { return }
-        pendingOtaWrite = nil
-        guard pending.0.count <= peripheral.maximumWriteValueLength(for: .withoutResponse) else {
-            pending.1(false)
-            return
-        }
-        peripheral.writeValue(pending.0, for: tx, type: .withoutResponse)
-        // Complete on the next turn so a long chain never recurses on this stack.
-        DispatchQueue.main.async { pending.1(true) }
     }
 
     private func handshakeFailed() {
@@ -1515,13 +1346,6 @@ class Nimo: NSObject, SGCManager {
         peerCompanionReady = nil
         canvasEncoder.invalidate()
         canvas.disconnected()
-        cancelFirmwareTimer?(); cancelFirmwareTimer = nil
-        firmwareUpdater?.cancel(); firmwareUpdater = nil
-        otaNotifyPending = nil
-        pendingOtaWrite = nil
-        firmwareState = .unknown
-        versionPackedReceived = false
-        versionDetailReceived = false
         receiveAssembler.reset()
         writes.reset()
         failAllPendingAcks()
@@ -1640,7 +1464,7 @@ class Nimo: NSObject, SGCManager {
             if v.count >= 10 {
                 peerCompanionReady = v[9] != 0
                 onTwsState(Int(v[8]) >= 1)
-                if handshakeState == .ready, firmwareState == .current {
+                if handshakeState == .ready {
                     canvas.readiness(twsConnected && peerCompanionReady != false, confirmed: true)
                 }
             }
@@ -1664,7 +1488,7 @@ class Nimo: NSObject, SGCManager {
         if !connected, handshakeState == .ready {
             Bridge.log("NIMO: TWS service dropped mid-session (arm removed/off?)")
         }
-        if handshakeState == .ready, firmwareState == .current { canvas.readiness(connected && peerCompanionReady != false) }
+        if handshakeState == .ready { canvas.readiness(connected && peerCompanionReady != false) }
     }
 
     private func handleInputEvent(_ code: Int) {
@@ -1725,9 +1549,7 @@ class Nimo: NSObject, SGCManager {
                 let micro = (v >> 12) & 0x1FF
                 let build = v & 0xFFF
                 firmwareVersionPacked = "\(major).\(minor).\(micro).\(build)"
-                versionPackedReceived = true
                 emitVersionInfo()
-                checkFirmware()
             }
         case NimoProtocol.GET_VERSION_DETAIL:
             var end = bytes.count
@@ -1737,9 +1559,7 @@ class Nimo: NSObject, SGCManager {
             firmwareVersionDetail =
                 String(bytes: bytes[0 ..< end], encoding: .utf8)?
                     .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            versionDetailReceived = true
             emitVersionInfo()
-            checkFirmware()
         case NimoProtocol.GET_TWS_STATUS:
             if !bytes.isEmpty {
                 onTwsState(Int(bytes[0]) >= 1)
@@ -1878,8 +1698,6 @@ extension Nimo: CBCentralManagerDelegate {
             self.txChar = nil
             self.rxChar = nil
             self.micChar = nil
-            self.otaTxChar = nil
-            self.otaRxChar = nil
             self.resetSessionState()
 
             if (DeviceManager.shared.sgc as? Nimo) === self {
@@ -1927,11 +1745,6 @@ extension Nimo: CBPeripheralDelegate {
                 case NimoBLE.CHAR_MIC:
                     self.micChar = char
                     peripheral.setNotifyValue(true, for: char)
-                case NimoBLE.CHAR_OTA_TX:
-                    self.otaTxChar = char
-                case NimoBLE.CHAR_OTA_RX:
-                    // Subscribed only when an update starts.
-                    self.otaRxChar = char
                 default:
                     break
                 }
@@ -1953,16 +1766,6 @@ extension Nimo: CBPeripheralDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             guard self.peripheral === peripheral else { return }
-            if characteristic === self.otaRxChar {
-                guard error == nil, characteristic.isNotifying else {
-                    self.abortTransport("NIMO firmware update notifications unavailable")
-                    return
-                }
-                let next = self.otaNotifyPending
-                self.otaNotifyPending = nil
-                next?()
-                return
-            }
             if let error {
                 self.abortTransport("Notification subscription failed")
                 Bridge.log("NIMO: notify enable failed: \(error.localizedDescription)")
@@ -1989,9 +1792,7 @@ extension Nimo: CBPeripheralDelegate {
             if uuid == NimoBLE.CHAR_RX, characteristic === self.rxChar {
                 self.handleRxPacket(data)
             } else if uuid == NimoBLE.CHAR_MIC, characteristic === self.micChar {
-                if !self.updating { self.handleMicPacket(data) }
-            } else if uuid == NimoBLE.CHAR_OTA_RX, characteristic === self.otaRxChar {
-                self.firmwareUpdater?.receive(data)
+                self.handleMicPacket(data)
             }
         }
     }
@@ -2001,13 +1802,6 @@ extension Nimo: CBPeripheralDelegate {
     ) {
         DispatchQueue.main.async { [weak self] in
             self?.writes.written(peripheral, characteristic: characteristic, success: error == nil)
-        }
-    }
-
-    nonisolated func peripheralIsReady(toSendWriteWithoutResponse peripheral: CBPeripheral) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.peripheral === peripheral else { return }
-            self.drainOtaWrite()
         }
     }
 }
