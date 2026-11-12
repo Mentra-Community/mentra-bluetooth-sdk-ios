@@ -130,38 +130,6 @@ class BlePhotoUploadService {
         }
     }
 
-    /**
-     * Process image data and keep it on the phone as a JPEG file in `directory`.
-     * Nothing is uploaded; the caller owns the file from then on.
-     * - Parameters:
-     *   - imageData: Raw image data (AVIF or JPEG)
-     *   - requestId: Original request ID for tracking
-     *   - directory: Where the file goes; created when missing
-     */
-    static func processAndSavePhoto(
-        imageData: Data,
-        requestId: String,
-        directory: URL,
-        onSaved: @escaping (String, URL, Int) -> Void,
-        onError: @escaping (String, String) -> Void
-    ) {
-        Task {
-            do {
-                let jpegData = try convertToJpegPreservingExif(imageData: imageData)
-                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-                let file = directory.appendingPathComponent("photo_\(UUID().uuidString).jpg")
-                try jpegData.write(to: file, options: .atomic)
-                Bridge.log(
-                    "\(TAG): Saved BLE photo on the phone for requestId: \(requestId) (\(jpegData.count) bytes)"
-                )
-                onSaved(requestId, file, jpegData.count)
-            } catch {
-                Bridge.log("\(TAG): Error saving BLE photo for requestId: \(requestId), error: \(error)")
-                onError(requestId, error.localizedDescription)
-            }
-        }
-    }
-
     private static func convertToJpegPreservingExif(imageData: Data) throws -> Data {
         logIncomingImageDiagnostics(imageData: imageData)
         if isJpeg(imageData) {
@@ -711,8 +679,6 @@ enum K900ProtocolUtils {
 
 private struct BlePhotoTransfer {
     var isThumbnail = false
-    /// The photo stays on the phone as a file instead of being uploaded.
-    var localFile = false
     let bleImgId: String
     let requestId: String
     let webhookUrl: String
@@ -735,42 +701,23 @@ enum BleIncidentLogRelayKind {
     case logcat
 }
 
-/// BES bytes kept on the phone until the MTK log for the same report has been uploaded.
-private final class HeldBesLog {
-    let relay: BleIncidentLogRelayEntry
-    let fileName: String
-    let data: Data
-    let savedAt: TimeInterval
-    var uploadStarted = false
-    var flush: DispatchWorkItem?
-
-    init(relay: BleIncidentLogRelayEntry, fileName: String, data: Data, savedAt: TimeInterval) {
-        self.relay = relay
-        self.fileName = fileName
-        self.data = data
-        self.savedAt = savedAt
-    }
-}
-
 final class BleIncidentLogRelayEntry {
     let fileBaseKey: String
     let incidentId: String
     let apiBaseUrl: String
     let kind: BleIncidentLogRelayKind
     let reservedAt: TimeInterval
-    let tokenOwner: String?
     var session: MentraLiveFileTransferSession?
 
     init(
         fileBaseKey: String, incidentId: String, apiBaseUrl: String, kind: BleIncidentLogRelayKind,
-        reservedAt: TimeInterval, tokenOwner: String?
+        reservedAt: TimeInterval
     ) {
         self.fileBaseKey = fileBaseKey
         self.incidentId = incidentId
         self.apiBaseUrl = apiBaseUrl
         self.kind = kind
         self.reservedAt = reservedAt
-        self.tokenOwner = tokenOwner
     }
 }
 
@@ -831,9 +778,7 @@ extension MentraLive: CBCentralManagerDelegate {
             || name.hasPrefix("MENTRA_LIVE_BT") || name.lowercased().hasPrefix("mentra_live")
         {
             let savedDeviceName = UserDefaults.standard.string(forKey: PREFS_DEVICE_NAME)
-            let isReconnectTarget = savedDeviceName.map {
-                ConnectedDeviceMatcher.sameSavedName(.mentraLive, saved: $0, advertised: name)
-            } ?? false
+            let isReconnectTarget = savedDeviceName != nil && savedDeviceName == name
             let discoveredAtMs = Self.monotonicNowMs()
             if advertisesPairingFlag(advertisementData) {
                 Self.secureTrailerMemory.recordSecureTrailer(peripheral.identifier, nowMs: discoveredAtMs)
@@ -846,7 +791,7 @@ extension MentraLive: CBCentralManagerDelegate {
                 return
             }
 
-            let glassType = name == "Xy_A" ? "Standard" : "Mentra Live"
+            let glassType = name == "Xy_A" ? "Standard" : "K900"
             let trailer = parseSecurePairingTrailer(advertisementData)
             // A packet without the trailer from a peripheral that just showed it is a partial
             // advertisement, not legacy firmware. Do not publish it: the scan list would show a
@@ -885,9 +830,7 @@ extension MentraLive: CBCentralManagerDelegate {
                 )
             }
 
-            let isSavedGlasses = savedDeviceName.map {
-                ConnectedDeviceMatcher.sameSavedName(.mentraLive, saved: $0, advertised: name)
-            } ?? false
+            let isSavedGlasses = savedDeviceName == name
             if isSavedGlasses, trailer.secureCapable {
                 observeSavedGlassesAdvertisement(trailer)
             }
@@ -1691,21 +1634,6 @@ class MentraLive: NSObject, SGCManager {
     private var activeFileTransfers = [String: MentraLiveFileTransferSession]()
     private var blePhotoTransfers = [String: BlePhotoTransfer]()
     private(set) var bleIncidentLogRelays = [String: BleIncidentLogRelayEntry]()
-    /// BES bytes kept on the phone until the MTK log for the same report has been uploaded.
-    private var heldBesLogs = [String: HeldBesLog]()
-    /// The BES file arrives first. Hold it this long so the MTK log can be uploaded before it.
-    var besHoldSeconds: TimeInterval = 30
-    /// A link lost mid-transfer leaves the MTK file incomplete with no terminal event, so stop
-    /// waiting after the glasses' own 120 s limit on that transfer.
-    var besMtkWaitMaxSeconds: TimeInterval = 150
-    /// The glasses delete a BES incident once they receive transfer_complete, so the phone owns
-    /// the only copy afterward. Retry the Cloud POST on this cadence until it is confirmed,
-    /// surviving a connectivity outage or process death.
-    var besRetrySeconds: TimeInterval = 60
-    /// Files with a resume attempt or retry pending, so a reconnect doesn't start a second one.
-    private var resumingBesFiles = Set<String>()
-    /// Durable store for held BES logs whose Cloud upload has not yet been confirmed.
-    private let besHeldDirName = "MentraLive_HeldBes"
     // Longer than the glasses' bounded relay of one report (BES logs, two file transfers, the
     // phone POST), so an unreleased name cannot be reused while its report is in flight.
     static let incidentRelayOwnershipSeconds: TimeInterval = 600
@@ -2611,21 +2539,10 @@ class MentraLive: NSObject, SGCManager {
         let bleImgId =
             "I" + String(format: "%09d", Int(Date().timeIntervalSince1970 * 1000) % 100_000_000)
         json["bleImgId"] = bleImgId
-        json["transferMethod"] = request.localFile ? "ble" : request.transferMethod
+        json["transferMethod"] = request.transferMethod
         if request.presendThumbnail { json["presend_thumbnail"] = true }
 
-        if request.localFile {
-            var transfer = BlePhotoTransfer(
-                bleImgId: bleImgId, requestId: request.requestId, webhookUrl: ""
-            )
-            transfer.localFile = true
-            blePhotoTransfers[bleImgId] = transfer
-            // A local photo has no upload target, but the glasses expect one: without it they
-            // route a save-to-gallery request to their gallery and transfer nothing, and reject
-            // a thumbnail request. So it names a stand-in, which the BLE transfer method never
-            // contacts.
-            json["webhookUrl"] = MentraLive.localPhotoTarget
-        } else if let webhookUrl = request.webhookUrl, !webhookUrl.isEmpty {
+        if let webhookUrl = request.webhookUrl, !webhookUrl.isEmpty {
             json["webhookUrl"] = webhookUrl
 
             var transfer = BlePhotoTransfer(
@@ -2641,7 +2558,7 @@ class MentraLive: NSObject, SGCManager {
         }
 
         // Add authToken to JSON if provided
-        if !request.localFile, let authToken = request.authToken, !authToken.isEmpty {
+        if let authToken = request.authToken, !authToken.isEmpty {
             json["authToken"] = authToken
         }
 
@@ -2665,7 +2582,7 @@ class MentraLive: NSObject, SGCManager {
         request.appendScanFields(to: &json)
 
         Bridge.log(
-            "LIVE: PHOTO PIPELINE [5b/6] take_photo JSON ready bleImgId=\(bleImgId) transferMethod=\(request.localFile ? "ble (local file)" : request.transferMethod)"
+            "LIVE: PHOTO PIPELINE [5b/6] take_photo JSON ready bleImgId=\(bleImgId) transferMethod=\(request.transferMethod)"
         )
         Bridge.log("LIVE: PHOTO PIPELINE [6/6] Dispatching take_photo to sendJson()")
 
@@ -4585,10 +4502,9 @@ class MentraLive: NSObject, SGCManager {
         guard !coreToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw BluetoothSdkError(code: "core_token_unavailable", message: "Cannot request incident logs without the current Core access token.")
         }
-        // Logs only ever go to the signed-in Core: there is no default to fall back to.
         var base = (apiBaseUrl ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !base.isEmpty else {
-            throw BluetoothSdkError(code: "core_url_unavailable", message: "Cannot request incident logs without the signed-in Core's URL.")
+        if base.isEmpty {
+            base = "https://api.mentra.glass"
         }
         while base.hasSuffix("/") {
             base = String(base.dropLast())
@@ -4596,14 +4512,11 @@ class MentraLive: NSObject, SGCManager {
         let bKey = MentraLive.incidentBleFileBase(incidentId: incidentId, prefix: "B")
         let lKey = MentraLive.incidentBleFileBase(incidentId: incidentId, prefix: "L")
         let now = incidentRelayClock()
-        let tokenOwner = MentraLive.coreTokenOwner(coreToken)
         let bRelay = BleIncidentLogRelayEntry(
-            fileBaseKey: bKey, incidentId: incidentId, apiBaseUrl: base, kind: .firmware, reservedAt: now,
-            tokenOwner: tokenOwner
+            fileBaseKey: bKey, incidentId: incidentId, apiBaseUrl: base, kind: .firmware, reservedAt: now
         )
         let lRelay = BleIncidentLogRelayEntry(
-            fileBaseKey: lKey, incidentId: incidentId, apiBaseUrl: base, kind: .logcat, reservedAt: now,
-            tokenOwner: tokenOwner
+            fileBaseKey: lKey, incidentId: incidentId, apiBaseUrl: base, kind: .logcat, reservedAt: now
         )
         try reserveIncidentRelays([bRelay, lRelay], now: now)
 
@@ -4613,7 +4526,7 @@ class MentraLive: NSObject, SGCManager {
         ]
         // MainActor queue insertion preserves auth-before-upload order, including all fragments.
         guard sendJson(auth, wakeUp: true, requireAck: true, bridgeLogging: true),
-              sendJson(["type": "upload_incident_logs", "incidentId": incidentId],
+              sendJson(["type": "upload_incident_logs", "incidentId": incidentId, "apiBaseUrl": base],
                        wakeUp: true, requireAck: true, bridgeLogging: true)
         else {
             releaseIncidentRelay(bRelay)
@@ -4887,10 +4800,6 @@ class MentraLive: NSObject, SGCManager {
         requestVersionInfo()
         sendCoreTokenToAsgClient()
         sendStoredUserEmailToAsgClient()
-
-        // Finish any BES log upload that was acknowledged to the glasses but not yet confirmed
-        // by Cloud before a previous process ended.
-        resumePersistedBesUploads()
 
         // Send user settings to glasses
         sendUserSettings()
@@ -5610,257 +5519,20 @@ class MentraLive: NSObject, SGCManager {
     func uploadBleIncidentLogRelay(
         relay: BleIncidentLogRelayEntry, fileName: String, data: Data
     ) {
-        // A different report now owns this name, so saving or confirming here would mark
-        // its file done. Drop the stale completion before it touches Cloud or the glasses.
-        if let owner = bleIncidentLogRelays[relay.fileBaseKey], owner.incidentId != relay.incidentId {
-            Bridge.log("LIVE: Dropping stale incident relay callback for \(relay.fileBaseKey)")
-            return
-        }
-        if relay.kind == .firmware {
-            saveBesUntilMtkArrives(relay: relay, fileName: fileName, data: data)
-            return
-        }
-        postIncidentLog(relay: relay, fileName: fileName, data: data, attemptsLeft: 0) { success, _ in
-            self.finishMtkUpload(relay: relay, fileName: fileName, success: success)
-        }
-    }
-
-    /// The glasses send the BES file first, then wait for transfer_complete before the MTK file.
-    /// Keep the BES bytes on the phone and accept the transfer immediately so the MTK log can
-    /// arrive and be uploaded first. The BES upload follows that POST.
-    private func saveBesUntilMtkArrives(
-        relay: BleIncidentLogRelayEntry, fileName: String, data: Data
-    ) {
-        let held = HeldBesLog(
-            relay: relay, fileName: fileName, data: data, savedAt: incidentRelayClock()
-        )
-        // The glasses drop their copy once they see this confirmation, so persist the bytes
-        // before acknowledging ownership. A process death or destroy() during the hold/upload
-        // then resumes from disk instead of stranding an already-acknowledged incident. With no
-        // durable copy, the glasses keep theirs and retry.
-        guard persistHeldBes(held) else {
-            relay.session = nil
+        let token = DeviceStore.shared.get("bluetooth", "core_token") as? String ?? ""
+        guard !token.isEmpty else {
             sendTransferCompleteConfirmation(fileName: fileName, success: false)
-            return
-        }
-        heldBesLogs[relay.incidentId]?.flush?.cancel()
-        let flush = DispatchWorkItem { [weak self] in
-            self?.flushHeldBesIfMtkMissing(relay.incidentId)
-        }
-        held.flush = flush
-        heldBesLogs[relay.incidentId] = held
-        DispatchQueue.main.asyncAfter(deadline: .now() + besHoldSeconds, execute: flush)
-        sendTransferCompleteConfirmation(fileName: fileName, success: true)
-        Bridge.log("LIVE: Saved BES log until the MTK log is uploaded: \(relay.incidentId)")
-    }
-
-    private func mtkTransferInProgress(_ incidentId: String) -> Bool {
-        for relay in bleIncidentLogRelays.values {
-            if relay.incidentId != incidentId || relay.kind != .logcat { continue }
-            guard let session = relay.session else { return false }
-            return !session.isComplete
-        }
-        return false
-    }
-
-    private func flushHeldBesIfMtkMissing(_ incidentId: String) {
-        guard let held = heldBesLogs[incidentId], !held.uploadStarted else { return }
-        if incidentRelayClock() - held.savedAt < besMtkWaitMaxSeconds, mtkTransferInProgress(incidentId) {
-            let again = DispatchWorkItem { [weak self] in
-                self?.flushHeldBesIfMtkMissing(incidentId)
-            }
-            held.flush = again
-            DispatchQueue.main.asyncAfter(deadline: .now() + besHoldSeconds, execute: again)
-            return
-        }
-        startHeldBesUpload(incidentId)
-    }
-
-    private func finishMtkUpload(
-        relay: BleIncidentLogRelayEntry, fileName: String, success: Bool
-    ) {
-        if !success {
-            // Keep the saved BES bytes. The glasses retry the MTK file; it is uploaded first.
             if let existing = bleIncidentLogRelays[relay.fileBaseKey] {
                 existing.session = nil
             }
+            return
+        }
+
+        guard var components = URLComponents(string: relay.apiBaseUrl) else {
             sendTransferCompleteConfirmation(fileName: fileName, success: false)
-            return
-        }
-        sendTransferCompleteConfirmation(fileName: fileName, success: true)
-        // Release only after the glasses' confirmation is queued, so a report that reuses
-        // this name is ordered behind the owner's completion.
-        releaseIncidentRelay(relay)
-        startHeldBesUpload(relay.incidentId)
-    }
-
-    private func startHeldBesUpload(_ incidentId: String) {
-        guard let held = heldBesLogs[incidentId], !held.uploadStarted else { return }
-        held.uploadStarted = true
-        held.flush?.cancel()
-        held.flush = nil
-        // transfer_complete already told the glasses this file arrived, so they will not resend
-        // it. Retry a failed Cloud POST on the phone.
-        postIncidentLog(
-            relay: held.relay, fileName: held.fileName, data: held.data, attemptsLeft: 1
-        ) { success, status in
-            let rejected = MentraLive.isPermanentIncidentRejection(status)
-            if rejected {
-                Bridge.log("LIVE: Cloud refused the BES log for \(incidentId): HTTP \(status ?? 0)")
+            if let existing = bleIncidentLogRelays[relay.fileBaseKey] {
+                existing.session = nil
             }
-            if success || rejected {
-                if self.heldBesLogs[incidentId] === held {
-                    self.heldBesLogs.removeValue(forKey: incidentId)
-                }
-                self.releaseIncidentRelay(held.relay)
-                self.deletePersistedBes(incidentId)
-            } else {
-                Bridge.log("LIVE: BES log upload failed after the MTK log for \(incidentId)")
-                // The flush timer is gone and the MTK relay is released, so nothing else will
-                // retry this acknowledged artifact. Keep the durable copy and schedule another
-                // attempt until Cloud confirms it.
-                held.uploadStarted = false
-                let retry = DispatchWorkItem { [weak self] in
-                    self?.startHeldBesUpload(incidentId)
-                }
-                held.flush = retry
-                DispatchQueue.main.asyncAfter(deadline: .now() + self.besRetrySeconds, execute: retry)
-            }
-        }
-    }
-
-    private func besHeldDir() -> URL? {
-        guard let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        else { return nil }
-        let dir = base.appendingPathComponent(besHeldDirName, isDirectory: true)
-        if !FileManager.default.fileExists(atPath: dir.path) {
-            do {
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            } catch {
-                Bridge.log("LIVE: Failed to create held BES directory: \(error)")
-                return nil
-            }
-        }
-        return dir
-    }
-
-    private func besHeldFileURL(_ incidentId: String) -> URL? {
-        let safe = incidentId.map { $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_" ? $0 : "_" }
-        return besHeldDir()?.appendingPathComponent(String(safe) + ".json")
-    }
-
-    /// Durably store a held BES log so its Cloud POST can survive process death or destroy().
-    private func persistHeldBes(_ held: HeldBesLog) -> Bool {
-        guard let url = besHeldFileURL(held.relay.incidentId) else { return false }
-        let record: [String: Any] = [
-            "incidentId": held.relay.incidentId,
-            "fileBaseKey": held.relay.fileBaseKey,
-            "apiBaseUrl": held.relay.apiBaseUrl,
-            "tokenOwner": held.relay.tokenOwner ?? NSNull(),
-            "fileName": held.fileName,
-            "bytesBase64": held.data.base64EncodedString(),
-        ]
-        do {
-            let data = try JSONSerialization.data(withJSONObject: record)
-            // Write atomically so a reader never observes a partially written record.
-            try data.write(to: url, options: .atomic)
-            return true
-        } catch {
-            Bridge.log("LIVE: Failed to persist held BES log for \(held.relay.incidentId): \(error)")
-            return false
-        }
-    }
-
-    private func deletePersistedBes(_ incidentId: String) {
-        guard let url = besHeldFileURL(incidentId) else { return }
-        try? FileManager.default.removeItem(at: url)
-    }
-
-    /// Re-POST any BES logs that were acknowledged to the glasses but whose Cloud upload never
-    /// confirmed before the previous process ended. The glasses no longer hold these, so the
-    /// phone is the only source; keep retrying until Cloud accepts each one.
-    func resumePersistedBesUploads() {
-        guard !isKilled, let dir = besHeldDir() else { return }
-        let files = (try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
-        let tracked = Set(heldBesLogs.values.compactMap { besHeldFileURL($0.relay.incidentId)?.lastPathComponent })
-        for file in files where file.pathExtension == "json" && !tracked.contains(file.lastPathComponent) {
-            guard resumingBesFiles.insert(file.lastPathComponent).inserted else { continue }
-            resumePersistedBesFile(file)
-        }
-    }
-
-    private func resumePersistedBesFile(_ file: URL) {
-        guard !isKilled else {
-            resumingBesFiles.remove(file.lastPathComponent)
-            return
-        }
-        guard
-            let data = try? Data(contentsOf: file),
-            let record = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-            let incidentId = record["incidentId"] as? String, !incidentId.isEmpty,
-            let apiBaseUrl = record["apiBaseUrl"] as? String, !apiBaseUrl.isEmpty,
-            let base64 = record["bytesBase64"] as? String,
-            let bytes = Data(base64Encoded: base64)
-        else {
-            Bridge.log("LIVE: Dropping unreadable persisted BES log: \(file.lastPathComponent)")
-            try? FileManager.default.removeItem(at: file)
-            resumingBesFiles.remove(file.lastPathComponent)
-            return
-        }
-        let fileName = record["fileName"] as? String ?? file.lastPathComponent
-        // A resume is a pure phone→Cloud POST; use an empty relay key so it can never be
-        // mistaken for (or dropped by) a live incident relay's ownership guard.
-        let relay = BleIncidentLogRelayEntry(
-            fileBaseKey: "", incidentId: incidentId, apiBaseUrl: apiBaseUrl, kind: .firmware,
-            reservedAt: incidentRelayClock(), tokenOwner: record["tokenOwner"] as? String
-        )
-        postIncidentLog(relay: relay, fileName: fileName, data: bytes, attemptsLeft: 1) { [weak self] success, status in
-            guard let self else { return }
-            if success || MentraLive.isPermanentIncidentRejection(status) {
-                Bridge.log("LIVE: Resumed BES log upload finished for \(incidentId): HTTP \(status ?? 0)")
-                try? FileManager.default.removeItem(at: file)
-                self.resumingBesFiles.remove(file.lastPathComponent)
-            } else if !self.isKilled {
-                Bridge.log("LIVE: Resumed BES log upload failed for \(incidentId)")
-                DispatchQueue.main.asyncAfter(deadline: .now() + self.besRetrySeconds) { [weak self] in
-                    self?.resumePersistedBesFile(file)
-                }
-            }
-        }
-    }
-
-    /// Who a Core access token speaks for, or nil if it isn't a readable token.
-    static func coreTokenOwner(_ token: String) -> String? {
-        let parts = token.split(separator: ".")
-        guard parts.count >= 2 else { return nil }
-        var payload = parts[1].replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
-        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
-        guard let data = Data(base64Encoded: payload),
-              let claims = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return nil }
-        return "\(claims["iss"] as? String ?? "")|\(claims["sub"] as? String ?? "")"
-    }
-
-    /// Cloud will refuse these bytes every time: missing report, invalid, conflicting or oversized body.
-    static func isPermanentIncidentRejection(_ status: Int?) -> Bool {
-        guard let status else { return false }
-        return [400, 404, 409, 410, 413, 422].contains(status)
-    }
-
-    private func postIncidentLog(
-        relay: BleIncidentLogRelayEntry,
-        fileName: String,
-        data: Data,
-        attemptsLeft: Int,
-        completion: @escaping (Bool, Int?) -> Void
-    ) {
-        let token = DeviceStore.shared.get("bluetooth", "core_token") as? String ?? ""
-        // After a sign-out or Core switch, the current token must not reach the report's Core.
-        guard !token.isEmpty,
-              MentraLive.coreTokenOwner(token) == relay.tokenOwner,
-              var components = URLComponents(string: relay.apiBaseUrl)
-        else {
-            DispatchQueue.main.async { completion(false, nil) }
             return
         }
         let basePath = components.path.hasSuffix("/")
@@ -5868,7 +5540,10 @@ class MentraLive: NSObject, SGCManager {
             : components.path
         components.path = basePath + "/api/client/reports/\(relay.incidentId)/artifacts"
         guard let url = components.url else {
-            DispatchQueue.main.async { completion(false, nil) }
+            sendTransferCompleteConfirmation(fileName: fileName, success: false)
+            if let existing = bleIncidentLogRelays[relay.fileBaseKey] {
+                existing.session = nil
+            }
             return
         }
 
@@ -5892,25 +5567,23 @@ class MentraLive: NSObject, SGCManager {
                 statusCode = nil
             }
             DispatchQueue.main.async {
-                if let owner = self.bleIncidentLogRelays[relay.fileBaseKey],
-                   owner.incidentId != relay.incidentId
-                {
+                // A different report now owns this name (it was admitted after our owner finished),
+                // so a completion here would mark ITS file done. Drop the stale callback.
+                if let owner = self.bleIncidentLogRelays[relay.fileBaseKey], owner.incidentId != relay.incidentId {
                     Bridge.log("LIVE: Dropping stale incident relay callback for \(relay.fileBaseKey)")
                     return
                 }
                 if ok {
                     Bridge.log("LIVE: ✅ Incident log BLE relay uploaded (\(relay.kind))")
-                    completion(true, statusCode)
-                } else if attemptsLeft > 0, !MentraLive.isPermanentIncidentRejection(statusCode) {
-                    self.postIncidentLog(
-                        relay: relay, fileName: fileName, data: data, attemptsLeft: attemptsLeft - 1,
-                        completion: completion
-                    )
-                } else {
-                    Bridge.log(
-                        "LIVE: ❌ Incident log BLE relay upload failed (\(relay.kind)) status=\(statusCode.map(String.init) ?? "none")"
-                    )
-                    completion(false, statusCode)
+                } else if let existing = self.bleIncidentLogRelays[relay.fileBaseKey] {
+                    // Keep relay entry for glasses retry after transfer_complete:false.
+                    existing.session = nil
+                }
+                self.sendTransferCompleteConfirmation(fileName: fileName, success: ok)
+                // Release only after the glasses' confirmation is queued, so a report that reuses
+                // this name is ordered behind the owner's completion.
+                if ok {
+                    self.releaseIncidentRelay(relay)
                 }
             }
         }.resume()
@@ -5926,10 +5599,6 @@ class MentraLive: NSObject, SGCManager {
                 "thumbnailUrl": "data:image/jpeg;base64," + imageData.base64EncodedString(),
                 "fileSizeBytes": imageData.count,
             ])
-            return
-        }
-        if transfer.localFile {
-            saveBlePhotoOnPhone(transfer, imageData: imageData)
             return
         }
         Bridge.log("LIVE: Processing BLE photo for upload. RequestId: \(transfer.requestId)")
@@ -5948,38 +5617,6 @@ class MentraLive: NSObject, SGCManager {
                 requestId: requestId,
                 errorCode: "PHONE_UPLOAD_FAILED",
                 errorMessage: "BLE photo upload failed: \(error)"
-            )
-        }
-    }
-
-    /// Stand-in upload target the glasses are given for a local photo. Never contacted.
-    private static let localPhotoTarget = "phone://local-photo"
-
-    /// Keep a BLE photo on the phone as a JPEG file and answer the request with its file URL.
-    private func saveBlePhotoOnPhone(_ transfer: BlePhotoTransfer, imageData: Data) {
-        Bridge.log("LIVE: Saving BLE photo on the phone. RequestId: \(transfer.requestId)")
-        // The caller moves each file out of this cache folder.
-        let directory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("mentra_local_photos", isDirectory: true)
-        BlePhotoUploadService.processAndSavePhoto(
-            imageData: imageData, requestId: transfer.requestId, directory: directory
-        ) { requestId, file, byteCount in
-            Bridge.sendPhotoResponse([
-                "type": "photo_response",
-                "state": "success",
-                "success": true,
-                "requestId": requestId,
-                "uploadUrl": "",
-                "photoUrl": file.absoluteString,
-                "contentType": "image/jpeg",
-                "fileSizeBytes": byteCount,
-                "timestamp": Int(Date().timeIntervalSince1970 * 1000),
-            ])
-        } onError: { requestId, error in
-            Bridge.sendPhotoError(
-                requestId: requestId,
-                errorCode: "PHONE_SAVE_FAILED",
-                errorMessage: "Could not save the photo on the phone: \(error)"
             )
         }
     }
@@ -7426,10 +7063,6 @@ class MentraLive: NSObject, SGCManager {
         )
 
         isKilled = true
-        for held in heldBesLogs.values {
-            held.flush?.cancel()
-        }
-        heldBesLogs.removeAll()
         // The pairing state outlives the manager; only its timer belongs to this instance.
         cancelPairingPauseTimer()
         unpairFlushWorkItem?.cancel()
