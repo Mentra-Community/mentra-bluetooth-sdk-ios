@@ -1900,9 +1900,31 @@ struct ViewState {
     }
 
     func requestPhoto(_ request: PhotoRequest) {
-        let routed = request.routedForCapture()
+        let manualExposureNs = request.exposureTimeNs.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        let manualIso = manualExposureNs != nil ? request.iso.flatMap { $0 > 0 ? $0 : nil } : nil
+        let routed = PhotoRequest(
+            requestId: request.requestId,
+            size: request.size,
+            webhookUrl: request.webhookUrl,
+            authToken: request.authToken,
+            compress: request.compress,
+            save: request.save,
+            sound: request.sound,
+            exposureTimeNs: manualExposureNs,
+            iso: manualIso,
+            aeExposureDivisor: request.aeExposureDivisor,
+            isoCap: request.isoCap,
+            noiseReduction: request.noiseReduction,
+            edgeEnhancement: request.edgeEnhancement,
+            mfnr: request.mfnr,
+            zsl: request.zsl,
+            ispDigitalGain: request.ispDigitalGain,
+            ispAnalogGain: request.ispAnalogGain,
+            mode: request.mode,
+            transferMethod: request.transferMethod
+        )
         Bridge.log(
-            "MAN: PHOTO PIPELINE [4/6] DeviceManager.requestPhoto requestId=\(routed.requestId) webhookUrl=\(routed.webhookUrl ?? "nil") size=\(routed.size.rawValue) compress=\(routed.compress.rawValue) save=\(routed.save) sound=\(routed.sound) exposureTimeNs=\(routed.exposureTimeNs.map { String($0) } ?? "nil") iso=\(routed.iso.map { String($0) } ?? "auto") aeDivisor=\(routed.aeExposureDivisor.map { String($0) } ?? "nil") isoCap=\(routed.isoCap.map { String($0) } ?? "nil") sgc=\(sgc != nil ? String(describing: type(of: sgc!)) : "null")"
+            "MAN: PHOTO PIPELINE [4/6] DeviceManager.requestPhoto requestId=\(routed.requestId) webhookUrl=\(routed.webhookUrl ?? "nil") size=\(routed.size.rawValue) compress=\(routed.compress.rawValue) save=\(routed.save) sound=\(routed.sound) exposureTimeNs=\(manualExposureNs.map { String($0) } ?? "nil") iso=\(manualIso.map { String($0) } ?? "auto") aeDivisor=\(routed.aeExposureDivisor.map { String($0) } ?? "nil") isoCap=\(routed.isoCap.map { String($0) } ?? "nil") sgc=\(sgc != nil ? String(describing: type(of: sgc!)) : "null")"
         )
         guard let sgc else {
             Bridge.log(
@@ -2125,6 +2147,9 @@ struct ViewState {
         clearOwnerLost()
         clearSecureFirmware()
         clearFormerOwnerKeys()
+        // An earlier scan's rows would list the forgotten glasses at the next pairing scan,
+        // which keeps rows it finds already listed, though they are not in pairing mode.
+        searchResults = []
         // With no connection object, MentraLive.forget() can't run. Only clear Live's saved
         // identity when Live is the target: forgetting G1/G2 must not touch a Live unit's.
         if sgc == nil, defaultWearable.contains(DeviceTypes.LIVE) || pendingWearable.contains(DeviceTypes.LIVE) {
