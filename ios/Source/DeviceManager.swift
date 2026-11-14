@@ -152,6 +152,14 @@ struct ViewState {
         Bridge.saveSetting("mentra_live_secure_firmware", false)
     }
 
+    /// Whether the forgotten glasses keep former owners' keys is learned again from the next
+    /// glasses' `pairing_info`.
+    private func clearFormerOwnerKeys() {
+        guard DeviceStore.shared.get("bluetooth", "mentra_live_former_owner_keys") as? Bool == true else { return }
+        DeviceStore.shared.apply("bluetooth", "mentra_live_former_owner_keys", false)
+        Bridge.saveSetting("mentra_live_former_owner_keys", false)
+    }
+
     private var pendingWearable: String {
         get { DeviceStore.shared.get("bluetooth", "pending_wearable") as? String ?? "" }
         set { DeviceStore.shared.apply("bluetooth", "pending_wearable", newValue) }
@@ -1892,9 +1900,31 @@ struct ViewState {
     }
 
     func requestPhoto(_ request: PhotoRequest) {
-        let routed = request.routedForCapture()
+        let manualExposureNs = request.exposureTimeNs.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        let manualIso = manualExposureNs != nil ? request.iso.flatMap { $0 > 0 ? $0 : nil } : nil
+        let routed = PhotoRequest(
+            requestId: request.requestId,
+            size: request.size,
+            webhookUrl: request.webhookUrl,
+            authToken: request.authToken,
+            compress: request.compress,
+            save: request.save,
+            sound: request.sound,
+            exposureTimeNs: manualExposureNs,
+            iso: manualIso,
+            aeExposureDivisor: request.aeExposureDivisor,
+            isoCap: request.isoCap,
+            noiseReduction: request.noiseReduction,
+            edgeEnhancement: request.edgeEnhancement,
+            mfnr: request.mfnr,
+            zsl: request.zsl,
+            ispDigitalGain: request.ispDigitalGain,
+            ispAnalogGain: request.ispAnalogGain,
+            mode: request.mode,
+            transferMethod: request.transferMethod
+        )
         Bridge.log(
-            "MAN: PHOTO PIPELINE [4/6] DeviceManager.requestPhoto requestId=\(routed.requestId) webhookUrl=\(routed.webhookUrl ?? "nil") size=\(routed.size.rawValue) compress=\(routed.compress.rawValue) save=\(routed.save) sound=\(routed.sound) exposureTimeNs=\(routed.exposureTimeNs.map { String($0) } ?? "nil") iso=\(routed.iso.map { String($0) } ?? "auto") aeDivisor=\(routed.aeExposureDivisor.map { String($0) } ?? "nil") isoCap=\(routed.isoCap.map { String($0) } ?? "nil") sgc=\(sgc != nil ? String(describing: type(of: sgc!)) : "null")"
+            "MAN: PHOTO PIPELINE [4/6] DeviceManager.requestPhoto requestId=\(routed.requestId) webhookUrl=\(routed.webhookUrl ?? "nil") size=\(routed.size.rawValue) compress=\(routed.compress.rawValue) save=\(routed.save) sound=\(routed.sound) exposureTimeNs=\(manualExposureNs.map { String($0) } ?? "nil") iso=\(manualIso.map { String($0) } ?? "auto") aeDivisor=\(routed.aeExposureDivisor.map { String($0) } ?? "nil") isoCap=\(routed.isoCap.map { String($0) } ?? "nil") sgc=\(sgc != nil ? String(describing: type(of: sgc!)) : "null")"
         )
         guard let sgc else {
             Bridge.log(
@@ -2116,6 +2146,7 @@ struct ViewState {
         MentraLivePairingStateStore.shared.update("forget") { $0.onForget() }
         clearOwnerLost()
         clearSecureFirmware()
+        clearFormerOwnerKeys()
         // With no connection object, MentraLive.forget() can't run. Only clear Live's saved
         // identity when Live is the target: forgetting G1/G2 must not touch a Live unit's.
         if sgc == nil, defaultWearable.contains(DeviceTypes.LIVE) || pendingWearable.contains(DeviceTypes.LIVE) {
