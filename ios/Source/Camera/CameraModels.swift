@@ -274,10 +274,6 @@ public struct PhotoRequest {
     public let zsl: Bool?
     public let ispDigitalGain: Int?
     public let ispAnalogGain: String?
-    /// Keep the photo on the phone: it comes over BLE, is saved as a JPEG file, and the
-    /// success response carries that file's URL as `photoUrl`. Nothing is uploaded, and
-    /// `webhookUrl` and `transferMethod` are ignored.
-    public let localFile: Bool
 
     public init(
         requestId: String? = nil,
@@ -299,8 +295,7 @@ public struct PhotoRequest {
         ispAnalogGain: String? = nil,
         mode: PhotoMode = .photo,
         transferMethod: String = "auto",
-        presendThumbnail: Bool = false,
-        localFile: Bool = false
+        presendThumbnail: Bool = false
     ) {
         self.requestId = nonBlankRequestId(requestId) ?? generatedCameraRequestId("photo")
         self.size = size
@@ -322,7 +317,6 @@ public struct PhotoRequest {
         self.mode = mode
         self.transferMethod = transferMethod
         self.presendThumbnail = presendThumbnail
-        self.localFile = localFile
     }
 
     public static func from(params: [String: Any]) throws -> PhotoRequest {
@@ -406,8 +400,7 @@ public struct PhotoRequest {
             ispAnalogGain: params["ispAnalogGain"] as? String,
             mode: PhotoMode(normalizedRawValue: params["mode"] as? String),
             transferMethod: transferMethod,
-            presendThumbnail: params["presend_thumbnail"] as? Bool ?? false,
-            localFile: params["localFile"] as? Bool ?? false
+            presendThumbnail: params["presend_thumbnail"] as? Bool ?? false
         )
     }
 
@@ -439,19 +432,6 @@ public struct PhotoRequest {
     }
 
     func withRequestId(_ requestId: String) -> PhotoRequest {
-        copy(requestId: requestId, exposureTimeNs: exposureTimeNs, iso: iso)
-    }
-
-    /// The request as the glasses get it: a manual exposure must be finite and positive, and a
-    /// manual ISO only applies with one. Every other field is kept.
-    func routedForCapture() -> PhotoRequest {
-        let manualExposureNs = exposureTimeNs.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
-        let manualIso = manualExposureNs != nil ? iso.flatMap { $0 > 0 ? $0 : nil } : nil
-        return copy(requestId: requestId, exposureTimeNs: manualExposureNs, iso: manualIso)
-    }
-
-    /// The one place a request is copied field by field, so a new field can't be dropped on the way.
-    private func copy(requestId: String, exposureTimeNs: Double?, iso: Int?) -> PhotoRequest {
         PhotoRequest(
             requestId: requestId,
             size: size,
@@ -472,8 +452,7 @@ public struct PhotoRequest {
             ispAnalogGain: ispAnalogGain,
             mode: mode,
             transferMethod: transferMethod,
-            presendThumbnail: presendThumbnail,
-            localFile: localFile
+            presendThumbnail: presendThumbnail
         )
     }
 }
