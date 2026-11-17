@@ -216,12 +216,12 @@ struct ViewState {
     }
 
     private var brightness: Int {
-        get { intValue(DeviceStore.shared.get("bluetooth", "brightness")) ?? 50 }
+        get { DeviceStore.shared.get("bluetooth", "brightness") as? Int ?? 50 }
         set { DeviceStore.shared.apply("bluetooth", "brightness", newValue) }
     }
 
     private var headUpAngle: Int {
-        get { intValue(DeviceStore.shared.get("bluetooth", "head_up_angle")) ?? 30 }
+        get { DeviceStore.shared.get("bluetooth", "head_up_angle") as? Int ?? 30 }
         set { DeviceStore.shared.apply("bluetooth", "head_up_angle", newValue) }
     }
 
@@ -443,7 +443,7 @@ struct ViewState {
             Bridge.log("MAN: ERROR - LC3 converter not initialized but format is LC3")
             return
         }
-        let frameSize = intValue(DeviceStore.shared.get("bluetooth", "lc3_frame_size")) ?? 60
+        let frameSize = DeviceStore.shared.get("bluetooth", "lc3_frame_size") as! Int
         let lc3Data = lc3Converter.encode(pcmData, frameSize: frameSize) as Data
         guard lc3Data.count > 0 else {
             Bridge.log("MAN: ERROR - LC3 encoding returned empty data")
@@ -1076,9 +1076,9 @@ struct ViewState {
             // have disconnected or switched glasses during the 2s window, and we must not push to a
             // stale/torn-down connection.
             guard let sgc = self?.sgc else { return }
-            let h = intValue(DeviceStore.shared.get("bluetooth", "dashboard_height")) ?? 4
+            let h = DeviceStore.shared.get("bluetooth", "dashboard_height") as? Int ?? 4
             // Fall back to the canonical default (2), matching DeviceStore, not 1.
-            let rawDepth = intValue(DeviceStore.shared.get("bluetooth", "dashboard_depth")) ?? 2
+            let rawDepth = DeviceStore.shared.get("bluetooth", "dashboard_depth") as? Int ?? 2
             let d = sgc.type == DeviceTypes.NIMO ? min(max(rawDepth, 0), 10) : min(max(rawDepth, 1), 4)
             sgc.setDashboardPosition(h, d)
         }
@@ -1900,31 +1900,9 @@ struct ViewState {
     }
 
     func requestPhoto(_ request: PhotoRequest) {
-        let manualExposureNs = request.exposureTimeNs.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
-        let manualIso = manualExposureNs != nil ? request.iso.flatMap { $0 > 0 ? $0 : nil } : nil
-        let routed = PhotoRequest(
-            requestId: request.requestId,
-            size: request.size,
-            webhookUrl: request.webhookUrl,
-            authToken: request.authToken,
-            compress: request.compress,
-            save: request.save,
-            sound: request.sound,
-            exposureTimeNs: manualExposureNs,
-            iso: manualIso,
-            aeExposureDivisor: request.aeExposureDivisor,
-            isoCap: request.isoCap,
-            noiseReduction: request.noiseReduction,
-            edgeEnhancement: request.edgeEnhancement,
-            mfnr: request.mfnr,
-            zsl: request.zsl,
-            ispDigitalGain: request.ispDigitalGain,
-            ispAnalogGain: request.ispAnalogGain,
-            mode: request.mode,
-            transferMethod: request.transferMethod
-        )
+        let routed = request.routedForCapture()
         Bridge.log(
-            "MAN: PHOTO PIPELINE [4/6] DeviceManager.requestPhoto requestId=\(routed.requestId) webhookUrl=\(routed.webhookUrl ?? "nil") size=\(routed.size.rawValue) compress=\(routed.compress.rawValue) save=\(routed.save) sound=\(routed.sound) exposureTimeNs=\(manualExposureNs.map { String($0) } ?? "nil") iso=\(manualIso.map { String($0) } ?? "auto") aeDivisor=\(routed.aeExposureDivisor.map { String($0) } ?? "nil") isoCap=\(routed.isoCap.map { String($0) } ?? "nil") sgc=\(sgc != nil ? String(describing: type(of: sgc!)) : "null")"
+            "MAN: PHOTO PIPELINE [4/6] DeviceManager.requestPhoto requestId=\(routed.requestId) webhookUrl=\(routed.webhookUrl ?? "nil") size=\(routed.size.rawValue) compress=\(routed.compress.rawValue) save=\(routed.save) sound=\(routed.sound) exposureTimeNs=\(routed.exposureTimeNs.map { String($0) } ?? "nil") iso=\(routed.iso.map { String($0) } ?? "auto") aeDivisor=\(routed.aeExposureDivisor.map { String($0) } ?? "nil") isoCap=\(routed.isoCap.map { String($0) } ?? "nil") sgc=\(sgc != nil ? String(describing: type(of: sgc!)) : "null")"
         )
         guard let sgc else {
             Bridge.log(
