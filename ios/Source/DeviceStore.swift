@@ -52,7 +52,6 @@ class DeviceStore {
         store.set("glasses", "hotspotSsid", "")
         store.set("glasses", "hotspotPassword", "")
         store.set("glasses", "hotspotGatewayIp", "")
-        store.set("glasses", "hotspotFrequency", 0)
         store.set("glasses", "bluetoothName", "")
         store.set("glasses", "macAddress", "")
         store.set("glasses", "controllerConnected", false)
