@@ -23,11 +23,9 @@ struct OtaManifestApp: Decodable {
 
 struct MtkPatch: Decodable {
     let startFirmware: String
-    let endFirmware: String?
 
     enum CodingKeys: String, CodingKey {
         case startFirmware = "start_firmware"
-        case endFirmware = "end_firmware"
     }
 }
 
@@ -116,9 +114,19 @@ enum OtaManifestChecker {
         currentBuildNumber: String,
         currentMtkVersion: String,
         currentBesVersion: String,
-        manifest: OtaManifest
+        manifest: OtaManifest,
+        // Mentra 3.0 is the oldest downgrade-safe target, matching Engine, ASG, and recovery.
+        // Coordinated releases guarantee higher supported ASG builds can downgrade; no source gate is needed.
+        // The shipped floor may increase, never decrease, and must stay aligned across all checkers.
+        // See asg_client/docs/mentra-live-spec.md#ota-and-updates.
+        // An explicit non-positive override still disables downgrades.
+        downgradeFloorVersionCode: Int = 51518114
     ) throws -> Bool {
-        try hasApkUpdate(currentBuildNumber: currentBuildNumber, manifest: manifest) ||
+        try hasApkUpdate(
+            currentBuildNumber: currentBuildNumber,
+            manifest: manifest,
+            downgradeFloorVersionCode: downgradeFloorVersionCode
+        ) ||
             hasMtkUpdate(patches: manifest.mtkPatches, full: manifest.mtkFullOta, currentVersion: currentMtkVersion) ||
             hasBesUpdate(besFirmware: manifest.besFirmware, currentVersion: currentBesVersion)
     }
@@ -143,7 +151,8 @@ enum OtaManifestChecker {
 
     private static func hasApkUpdate(
         currentBuildNumber: String,
-        manifest: OtaManifest
+        manifest: OtaManifest,
+        downgradeFloorVersionCode: Int
     ) throws -> Bool {
         guard let currentVersion = Int(currentBuildNumber) else {
             throw BluetoothSdkError(
@@ -175,91 +184,41 @@ enum OtaManifestChecker {
             }
             return false
         }
-        // Exact match: already on the pin, no update.
-        return serverVersion != currentVersion
-    }
-
-    /// Each published downgrade's record, by its two versions.
-    static let mtkDowngradeRecordBaseUrl = "https://mtkfirmware.mentraglass.com/"
-
-    private static func normalizeMtk(_ value: String) -> String {
-        value.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "_").last ?? ""
-    }
-
-    /// Date, then revision (a date-only version is revision 0); false when either is unknown.
-    static func isNewerMtk(_ target: String, _ current: String) -> Bool {
-        let pattern = "^[0-9]{8}(\\.[0-9]{1,9})?$"
-        let t = normalizeMtk(target), c = normalizeMtk(current)
-        guard t.range(of: pattern, options: .regularExpression) != nil,
-              c.range(of: pattern, options: .regularExpression) != nil
-        else { return false }
-        let targetParts = t.split(separator: ".").compactMap { Int64($0) }
-        let currentParts = c.split(separator: ".").compactMap { Int64($0) }
-        let targetRevision = targetParts.count == 2 ? targetParts[1] : 0
-        let currentRevision = currentParts.count == 2 ? currentParts[1] : 0
-        return targetParts[0] > currentParts[0] ||
-            (targetParts[0] == currentParts[0] && targetRevision > currentRevision)
-    }
-
-    /// The older MTK this manifest pins: its full OTA's version, or else the one version its
-    /// patches all end at.
-    static func mtkDowngradeTarget(_ manifest: OtaManifest, currentVersion: String) -> String? {
-        var target: String?
-        if let full = manifest.mtkFullOta {
-            target = full.endFirmware.map(normalizeMtk)
-        } else {
-            for patch in manifest.mtkPatches ?? [] {
-                let end = normalizeMtk(patch.endFirmware ?? "")
-                if let target, target != end { return nil }
-                target = end
-            }
+        if serverVersion > currentVersion {
+            return true
         }
-        guard let target, isNewerMtk(currentVersion, target) else { return nil }
-        return target
-    }
-
-    /// Whether the glasses would downgrade their MTK to the older one this manifest pins: its
-    /// release predates the newer MTK, so the downgrade's published record decides.
-    static func hasMtkDowngrade(
-        manifest: OtaManifest,
-        currentVersion: String,
-        fetchRecord: (String) async -> [String: Any]? = fetchDowngradeRecord
-    ) async -> Bool {
-        guard let target = mtkDowngradeTarget(manifest, currentVersion: currentVersion) else { return false }
-        let url = "\(mtkDowngradeRecordBaseUrl)mtk_ota_downgrade_\(normalizeMtk(currentVersion))_\(target).json"
-        guard let record = await fetchRecord(url),
-              let start = record["start_firmware"] as? String, normalizeMtk(start) == normalizeMtk(currentVersion),
-              let end = record["end_firmware"] as? String, normalizeMtk(end) == target,
-              let link = record["url"] as? String, link.range(of: "^https?://[^/\\s]+/.*$", options: .regularExpression) != nil,
-              let hash = record["sha256"] as? String, hash.range(of: "^[a-fA-F0-9]{64}$", options: .regularExpression) != nil,
-              let size = record["size"] as? Int64 ?? (record["size"] as? Int).map(Int64.init),
-              size > 0, size <= 1024 * 1024 * 1024
-        else { return false }
-        return true
-    }
-
-    static func fetchDowngradeRecord(_ url: String) async -> [String: Any]? {
-        guard let url = URL(string: url),
-              let (data, response) = try? await URLSession.shared.data(from: url),
-              (response as? HTTPURLResponse).map({ (200 ... 299).contains($0.statusCode) }) == true
-        else { return nil }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        // Exact match: already on the pin, no update.
+        if serverVersion == currentVersion {
+            return false
+        }
+        // Downgrade: only actionable at/above the enabled floor; a non-positive floor disables
+        // downgrades (fail closed, matching ASG and the engine).
+        return downgradeFloorVersionCode > 0 && serverVersion >= downgradeFloorVersionCode
     }
 
     private static func hasMtkUpdate(patches: [MtkPatch]?, full: MtkFullOta?, currentVersion: String) -> Bool {
-        let current = normalizeMtk(currentVersion)
+        func normalize(_ value: String) -> String {
+            value.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: "_").last ?? ""
+        }
+        let current = normalize(currentVersion)
         guard !current.isEmpty else { return false }
-        // An upgrade only: a reverse patch listed here could be a userdata-wiping one.
-        if (patches ?? []).contains(where: {
-            normalizeMtk($0.startFirmware) == current && isNewerMtk($0.endFirmware ?? "", current)
-        }) { return true }
-        guard let full, let endFirmware = full.endFirmware,
+        if (patches ?? []).contains(where: { normalize($0.startFirmware) == current }) { return true }
+        guard let full, let endFirmware = full.endFirmware else { return false }
+        let target = normalize(endFirmware)
+        let pattern = "^[0-9]{8}(\\.[0-9]{1,9})?$"
+        guard current.range(of: pattern, options: .regularExpression) != nil,
+              target.range(of: pattern, options: .regularExpression) != nil,
               !full.hasStartFirmware,
               let url = full.url, url.range(of: "^https?://[^/\\s]+/.*$", options: .regularExpression) != nil,
               let hash = full.sha256, hash.range(of: "^[a-fA-F0-9]{64}$", options: .regularExpression) != nil,
               let size = full.size, size > 0, size <= 1024 * 1024 * 1024
         else { return false }
-        return isNewerMtk(endFirmware, current)
+        let currentParts = current.split(separator: ".").compactMap { Int64($0) }
+        let targetParts = target.split(separator: ".").compactMap { Int64($0) }
+        let currentRevision = currentParts.count == 2 ? currentParts[1] : 0
+        let targetRevision = targetParts.count == 2 ? targetParts[1] : 0
+        return targetParts[0] > currentParts[0] ||
+            (targetParts[0] == currentParts[0] && targetRevision > currentRevision)
     }
 
     private static func hasBesUpdate(besFirmware: BesFirmware?, currentVersion: String) throws -> Bool {
