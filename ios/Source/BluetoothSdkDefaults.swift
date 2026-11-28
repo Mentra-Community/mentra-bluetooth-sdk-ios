@@ -17,7 +17,7 @@ enum BluetoothSdkDefaults {
     /// persist.mentra.wear_detection_off=1.
     static let autoPowerOffEnabled = true
     private static let infoSdkVersionKey = "MentraBluetoothSdkVersion"
-    private static let swiftPackageSdkVersion = "3.5.0-dev.1563"
+    private static let swiftPackageSdkVersion = "3.5.0-dev.1564"
     private static let swiftPackageSdkVersionPlaceholder = "__MENTRA" + "_BLUETOOTH_SDK_VERSION__"
 
     private static func normalizedSdkVersion(_ value: String?) -> String? {
